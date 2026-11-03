@@ -1,10 +1,11 @@
 """Data migration export looks up Workspaces by integer primary key."""
 
+import json
 import os
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -21,10 +22,20 @@ class TestBuildMigrationExportWorkspaceLookup:
             workspace_name="Workspace A",
             deleted_at=None,
         )
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        from federation.core import public_key_fingerprint
+
+        key = Ed25519PrivateKey.generate()
+        pem = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+        fingerprint = public_key_fingerprint(pem)
         with (
             patch("helpers.export_import.get_workspace_by_id", return_value=workspace) as get_ws,
             patch("helpers.export_import.DbManager.find_records", return_value=[]),
             patch("helpers.export_import.os.environ.get", return_value=""),
+            patch("federation.core.get_or_create_instance_keypair", return_value=(key, pem)),
+            patch("federation.core.get_instance_id", return_value=fingerprint),
             caplog.at_level(logging.DEBUG, logger="syncbot"),
         ):
             payload = build_migration_export(42)
@@ -36,8 +47,9 @@ class TestBuildMigrationExportWorkspaceLookup:
         assert payload["version"] == 1
         assert payload["syncbot_version"]
         assert "federation_file_parts" not in payload
-        assert "source_instance" not in payload
-        assert "connection_code" not in payload
+        assert payload["source_instance"] == {"instance_id": fingerprint, "public_key": pem}
+        assert "webhook_url" not in payload["source_instance"]
+        assert "connection_code" not in payload["source_instance"]
         assert any(
             record.message == "migration_export" and record.__dict__.get("team_id") == "T1" for record in caplog.records
         )
@@ -583,6 +595,71 @@ def _export_rows():
         )
     )
     return local
+
+
+def test_export_signature_names_this_install(real_db):
+    import base64
+    import copy
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    from federation.core import get_instance_id, public_key_fingerprint
+    from helpers.export_import import canonical_json_dumps, verify_migration_signature
+
+    local = _export_rows()
+    payload = build_migration_export(local.id)
+    source = payload["source_instance"]
+    assert source["instance_id"] == get_instance_id()
+    assert public_key_fingerprint(source["public_key"]) == source["instance_id"]
+    assert "webhook_url" not in source
+    assert "connection_code" not in source
+    assert verify_migration_signature(payload)
+
+    changed = copy.deepcopy(payload)
+    changed["groups"][0]["name"] = "Renamed"
+    assert verify_migration_signature(changed) is False
+
+    other = Ed25519PrivateKey.generate()
+    other_pem = other.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+    resigned = copy.deepcopy(payload)
+    resigned["source_instance"]["public_key"] = other_pem
+    raw = canonical_json_dumps({key: value for key, value in resigned.items() if key != "signature"}).decode()
+    resigned["signature"] = base64.b64encode(other.sign(raw.encode())).decode()
+    assert verify_migration_signature(resigned) is False
+    assert verify_migration_signature({"version": 1, "groups": []}) is False
+
+
+def test_review_skips_the_integrity_warning_without_a_source_instance():
+    from handlers.export_import import handle_data_migration_submit_ack
+
+    payload = {"version": 1, "workspace": {"team_id": "T1"}, "groups": []}
+    workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
+    body = {
+        "user": {"id": "U1"},
+        "team": {"id": "T1"},
+        "view": {
+            "state": {
+                "values": {
+                    "data_migration_json_input": {
+                        "data_migration_json_input": {
+                            "files": [{"url_private_download": "https://files.slack.com/m.json"}],
+                        }
+                    }
+                }
+            }
+        },
+    }
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(json.dumps(payload), None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
+        patch("handlers.export_import.DbManager.find_records", return_value=[]),
+        patch("handlers.export_import.helpers.federation_enabled", return_value=True),
+        patch("helpers._cache._cache_set"),
+    ):
+        resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+    assert "Integrity check failed" not in str(resp["view"])
 
 
 def test_export_omits_a_disbanded_group_and_a_group_this_workspace_left(real_db):

@@ -560,15 +560,23 @@ def build_migration_export(workspace_id: int) -> dict:
         "user_mappings": user_mappings_data,
     }
 
-    # Sign with Ed25519 (exclude signature from signed bytes; include signed_at)
+    # Sign with Ed25519. source_instance is inside the signed bytes.
     try:
         from federation import core as federation
 
+        _, public_key = federation.get_or_create_instance_keypair()
+        payload["source_instance"] = {
+            "instance_id": federation.get_instance_id(),
+            "public_key": public_key,
+        }
         payload["signed_at"] = datetime.now(UTC).isoformat() + "Z"
         to_sign = {k: v for k, v in payload.items() if k != "signature"}
         raw = canonical_json_dumps(to_sign).decode("utf-8")
         payload["signature"] = federation.sign_body(raw)
     except Exception as e:
+        payload.pop("source_instance", None)
+        payload.pop("signed_at", None)
+        payload.pop("signature", None)
         log_warning("build_migration_export", error=str(e))
 
     log_info(
@@ -583,18 +591,26 @@ def build_migration_export(workspace_id: int) -> dict:
 
 
 def verify_migration_signature(data: dict) -> bool:
-    """Verify Ed25519 signature using source_instance.public_key. Returns False if no signature or invalid."""
+    """Verify the file with the public key of the install named in it.
+
+    Returns False when the signature, ``source_instance``, or its public key is
+    missing, when ``instance_id`` is not that key's fingerprint, or when the
+    signature does not match.
+    """
     sig = data.get("signature")
     source = data.get("source_instance")
-    if not sig or not source:
+    if not sig or not isinstance(source, dict):
         return False
     public_key = source.get("public_key")
-    if not public_key:
+    instance_id = str(source.get("instance_id") or "").strip()
+    if not public_key or not instance_id:
+        return False
+    from federation import core as federation
+
+    if not federation.instance_id_matches_public_key(instance_id, public_key):
         return False
     to_verify = {k: v for k, v in data.items() if k != "signature"}
     raw = canonical_json_dumps(to_verify).decode("utf-8")
-    from federation import core as federation
-
     return federation.verify_body(raw, sig, public_key)
 
 
