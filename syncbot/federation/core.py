@@ -635,7 +635,11 @@ def _federation_request(
     mount path. Signs the request with this instance's Ed25519 private key and
     retries up to :data:`_MAX_RETRIES` times on transient failures.
     """
-    url = fed_ws.webhook_url.rstrip("/") + path
+    from helpers.workspace_kind import is_self_instance
+
+    if is_self_instance(fed_ws):
+        return None
+    url = (fed_ws.webhook_url or "").rstrip("/") + path
     body = json.dumps(payload)
     req_timeout = timeout if timeout is not None else _REQUEST_TIMEOUT
     accepted = accept_statuses or frozenset({200})
@@ -749,7 +753,11 @@ def push_file_part(
     """POST one raw file part. Retries once on 413 with the peer's file_chunk_mb."""
     import hashlib as _hashlib
 
-    url = fed_ws.webhook_url.rstrip("/") + "/file"
+    from helpers.workspace_kind import is_self_instance
+
+    if is_self_instance(fed_ws):
+        return None
+    url = (fed_ws.webhook_url or "").rstrip("/") + "/file"
     chunk_sha = _hashlib.sha256(payload).hexdigest()
     sign_body_str = f"POST:/api/federation/file:{sha256}:{part_index}:{total}:{chunk_sha}"
 

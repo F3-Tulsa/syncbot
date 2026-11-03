@@ -952,7 +952,10 @@ def _soft_delete_uninstalled_workspace(team_id: str) -> None:
         peer = DbManager.get_record(schemas.Instance, id=pending.instance_id)
         if not peer or peer.status != "active" or peer.trust_status != "trusted":
             continue
-        from helpers.workspace_kind import convert_workspace_to_stub
+        from helpers.workspace_kind import convert_workspace_to_stub, is_self_instance
+
+        if is_self_instance(peer):
+            continue
 
         if convert_workspace_to_stub(team_id, peer.instance_id, source="uninstall") == "converted":
             from helpers.sync_participation import invalidate_sync_fanout_for_syncs

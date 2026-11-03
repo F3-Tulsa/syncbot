@@ -577,6 +577,55 @@ class TestFedWsCacheInvalidation:
         assert status == 400
         assert resp == {"error": "code_too_long"}
 
+    def test_peer_accepted_rejects_this_install(self):
+        from unittest.mock import MagicMock
+
+        from federation import api as federation_api
+
+        self_row = SimpleNamespace(status="active", trust_status="trusted", private_key_encrypted="cipher")
+        peer = SimpleNamespace(status="active", trust_status="trusted", private_key_encrypted=None)
+        assert federation_api._peer_accepted(self_row) is False
+        assert federation_api._peer_accepted(peer) is True
+        assert federation_api._peer_accepted(MagicMock(status="active", trust_status="trusted")) is True
+
+    def test_inbound_pair_refuses_this_install(self):
+        from federation import api as federation_api
+
+        body = {
+            "code": "FED-ABCD1234",
+            "webhook_url": "https://peer.example/api/federation",
+            "instance_id": "a" * 64,
+            "public_key": "pem",
+        }
+        with (
+            patch.object(federation_api.federation, "federation_verify", return_value=True),
+            patch.object(federation_api.federation, "instance_id_matches_public_key", return_value=True),
+            patch.object(federation_api.federation, "get_instance_id", return_value=body["instance_id"]),
+            patch.object(federation_api.DbManager, "update_records") as update,
+            patch.object(federation_api.DbManager, "find_records") as find,
+        ):
+            status, resp = federation_api.handle_pair(
+                body,
+                json.dumps(body),
+                {
+                    "X-Federation-Signature": "sig",
+                    "X-Federation-Timestamp": "1",
+                    "X-Federation-Instance": body["instance_id"],
+                },
+            )
+        assert status == 400
+        assert resp == {"error": "self_pair"}
+        update.assert_not_called()
+        find.assert_not_called()
+
+    def test_mark_peer_untrusted_ignores_this_install(self):
+        from helpers.workspace_kind import mark_peer_untrusted
+
+        self_row = SimpleNamespace(instance_id="a" * 64, private_key_encrypted="cipher")
+        with patch("helpers.workspace_kind.DbManager.update_records") as update:
+            mark_peer_untrusted(self_row)
+        update.assert_not_called()
+
     def test_invalidate_helper_deletes_prefix(self):
         from helpers.workspace import invalidate_fed_ws_for_sync_cache
 
@@ -629,6 +678,7 @@ class TestExternalConnectionModals:
         with (
             patch("handlers.federation_cmds.helpers.federation_enabled", return_value=True),
             patch("handlers.federation_cmds.federation.parse_federation_code", return_value=payload),
+            patch("handlers.federation_cmds.DbManager.get_record", return_value=None),
             patch("handlers.federation_cmds._local_workspace_options", return_value=[]),
         ):
             result = handle_join_external_connection_submit_ack(body, MagicMock(), {})
@@ -643,6 +693,31 @@ class TestExternalConnectionModals:
         assert "Team ID: `TPRIMARY`" in text
         assert "Remote HQ" not in text
         assert "https://peer.example/api/federation" in text
+
+    def test_join_ack_refuses_this_installs_code(self):
+        from handlers.federation_cmds import handle_join_external_connection_submit_ack
+
+        payload = {
+            "code": "FED-ABCD",
+            "webhook_url": "https://ws-a.example/api/federation",
+            "instance_id": "a" * 64,
+        }
+        body = {
+            "view": {
+                "state": {
+                    "values": {"join_external_connection_code": {"join_external_connection_code": {"value": "ENCODED"}}}
+                }
+            }
+        }
+        self_row = SimpleNamespace(instance_id="a" * 64, private_key_encrypted="cipher")
+        with (
+            patch("handlers.federation_cmds.helpers.federation_enabled", return_value=True),
+            patch("handlers.federation_cmds.federation.parse_federation_code", return_value=payload),
+            patch("handlers.federation_cmds.DbManager.get_record", return_value=self_row),
+        ):
+            result = handle_join_external_connection_submit_ack(body, MagicMock(), {})
+        assert result["response_action"] == "errors"
+        assert "this SyncBot install" in result["errors"]["join_external_connection_code"]
 
     def test_create_ack_keeps_modal_open(self):
         from handlers._common import _DM_WAIT_TEXT

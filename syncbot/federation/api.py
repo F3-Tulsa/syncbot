@@ -676,6 +676,8 @@ def _reject_unknown_source_team(body: dict, fed_ws: schemas.Instance) -> tuple[i
 
 
 def _peer_accepted(fed_ws: schemas.Instance | None) -> bool:
+    if helpers.is_self_instance(fed_ws):
+        return False
     return bool(fed_ws and getattr(fed_ws, "status", None) == "active" and peer_is_trusted(fed_ws))
 
 
@@ -881,6 +883,9 @@ def handle_pair(body: dict, body_str: str, headers: dict) -> tuple[int, dict]:
 
     if not federation.federation_verify(body_str, parsed["sig"], parsed["ts"], remote_public_key):
         return _pair_client_error("invalid_signature", 401)
+
+    if parsed["instance_id"] == federation.get_instance_id():
+        return _pair_client_error("self_pair")
 
     if not _PAIRING_CODE_RE.match(code):
         return _pair_client_error("invalid_code_format")

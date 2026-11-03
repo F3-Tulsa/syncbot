@@ -699,6 +699,16 @@ def handle_join_external_connection_submit_ack(body: dict, client: WebClient, co
                 )
             },
         }
+    self_row = DbManager.get_record(schemas.Instance, id=payload["instance_id"])
+    if helpers.is_self_instance(self_row):
+        return {
+            "response_action": "errors",
+            "errors": {
+                actions.CONFIG_JOIN_EXTERNAL_CONNECTION_CODE: (
+                    "That code is from this SyncBot install. Paste a code from the other instance."
+                )
+            },
+        }
     review = orm.BlockView(
         blocks=[
             *_connection_detail_blocks(payload),
