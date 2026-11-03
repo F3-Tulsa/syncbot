@@ -117,6 +117,18 @@ LEFTOVER_NAMES = (
     "user_has_private_channel",
     "_sync_channel_by_pk",
     "_workspace_by_pk",
+    "handle_data_migration_request",
+    "handle_pairing_request_approve",
+    "handle_pairing_request_decline",
+    "fulfill_pairing_request",
+    "_dm_migration_requester",
+    "_request_id_from_action",
+    "_ensure_migration_connection",
+    "_primary_workspace_code_tick",
+    "include_source_instance",
+    "data_migration_request",
+    "pairing_request_approve",
+    "pairing_request_decline",
 )
 
 # A whole identifier: no identifier character on either side, so

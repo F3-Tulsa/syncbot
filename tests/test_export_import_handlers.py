@@ -4,6 +4,8 @@ import json
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 os.environ.setdefault("DATABASE_HOST", "localhost")
 os.environ.setdefault("DATABASE_USER", "root")
 os.environ.setdefault("DATABASE_PASSWORD", "test")
@@ -144,27 +146,23 @@ class TestHandleBackupRestorePrimaryWorkspace:
 
 
 class TestDataMigrationModal:
-    def test_export_buttons_and_copy(self):
+    @pytest.mark.parametrize("federation_on", [True, False])
+    def test_export_buttons_and_copy(self, federation_on):
         from handlers.export_import import handle_data_migration
 
         client = MagicMock()
         body = {"user": {"id": "U1"}, "team": {"id": "T1"}, "trigger_id": "tr"}
         with (
             patch("handlers.export_import._is_admin", return_value=True),
-            patch("handlers.export_import.helpers.federation_enabled", return_value=True),
-            patch("handlers.export_import._primary_workspace_code_tick", return_value="`Workspace A`"),
+            patch("handlers.export_import.helpers.federation_enabled", return_value=federation_on),
         ):
             handle_data_migration(body, client, MagicMock(), {})
         view = client.views_update.call_args.kwargs["view"]
         text = str(view)
         assert ":outbox_tray: Export" in text
-        assert ":link: Export and Request Connection" in text
-        assert "admins of `Workspace A`" in text
+        assert ":link:" not in text
         assert "as a DM" in text
-        assert "not connected yet" in text
-        assert "after an admin approves the request" in text
-        assert "Export only" not in text
-        assert "Home tab" not in text
+        assert "*Import*" in text
 
     def test_export_confirms_in_modal_after_dm(self):
         from types import SimpleNamespace
@@ -188,143 +186,6 @@ class TestDataMigrationModal:
         assert view["close"]["text"] == "Close"
         assert view["blocks"][0]["text"]["text"] == _DM_WAIT_TEXT
         assert view.get("submit") is None
-
-
-class TestDataMigrationRequest:
-    def test_confirms_in_modal_and_names_requester_without_mention(self):
-        from types import SimpleNamespace
-
-        from handlers.export_import import handle_data_migration_request
-
-        client = MagicMock()
-        body = {
-            "user": {"id": "U_REQ"},
-            "team": {"id": "T_SRC"},
-            "view": {"id": "V1"},
-        }
-        workspace = SimpleNamespace(id=1, team_id="T_SRC", workspace_name="Workspace A", deleted_at=None)
-        primary = SimpleNamespace(id=2, team_id="T_PRIMARY", deleted_at=None)
-        request = SimpleNamespace(id=9, subject_team_id="T_SRC", requested_by_user_id="U_REQ")
-        with (
-            patch.dict(os.environ, {"PRIMARY_WORKSPACE": "T_PRIMARY"}),
-            patch("handlers.export_import.helpers.federation_enabled", return_value=True),
-            patch("handlers.export_import._is_admin", return_value=True),
-            patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
-            patch("handlers.export_import.DbManager.find_records", return_value=[]),
-            patch("handlers.export_import.DbManager.create_record", return_value=request),
-            patch("handlers.export_import.DbManager.get_record", return_value=primary),
-            patch("handlers.export_import.helpers.get_bot_token", return_value="xoxb-primary"),
-            patch("handlers.export_import.helpers.get_user_info", return_value=("Ada Lovelace", None)),
-            patch("handlers.export_import.helpers.resolve_workspace_name", return_value="Workspace A"),
-            patch("handlers.export_import._primary_workspace_code_tick", return_value="`Workspace A`"),
-            patch("handlers.export_import.helpers.notify_admins_dm") as notify,
-            patch("handlers.export_import._dm_migration_requester") as requester_dm,
-            patch("handlers.export_import.WebClient"),
-        ):
-            handle_data_migration_request(body, client, MagicMock(), {})
-
-        text = notify.call_args.args[1]
-        assert "<@U_REQ>" not in text
-        assert "`Ada Lovelace (Workspace A)`" in text
-        assert "requested to export data and create a remote connection." in text
-        assert ":globe_with_meridians: Approve and Create" in str(notify.call_args)
-        assert requester_dm.call_args.args[1] == (
-            ":outbox_tray: Your request to export data and create a remote connection has been sent to admins in the `Workspace A` workspace."
-        )
-        view = client.views_update.call_args.kwargs["view"]
-        assert view["close"]["text"] == "Close"
-        assert "A DM was sent to admins in `Workspace A`" in view["blocks"][0]["text"]["text"]
-
-    def test_already_waiting_names_primary(self):
-        from types import SimpleNamespace
-
-        from handlers.export_import import handle_data_migration_request
-
-        client = MagicMock()
-        body = {"user": {"id": "U_REQ"}, "team": {"id": "T_SRC"}, "view": {"id": "V1"}}
-        pending = SimpleNamespace(id=9, subject_team_id="T_SRC", requested_by_user_id="U_REQ")
-        with (
-            patch("handlers.export_import.helpers.federation_enabled", return_value=True),
-            patch("handlers.export_import._is_admin", return_value=True),
-            patch("handlers.export_import.helpers.get_workspace_record", return_value=SimpleNamespace()),
-            patch("handlers.export_import.DbManager.find_records", return_value=[pending]),
-            patch("handlers.export_import._primary_workspace_code_tick", return_value="`Workspace A`"),
-            patch("handlers.export_import._dm_migration_requester") as requester_dm,
-        ):
-            handle_data_migration_request(body, client, MagicMock(), {})
-
-        assert requester_dm.call_args.args[1] == (
-            ":outbox_tray: A request to export data and create a remote connection is already waiting "
-            "for admins in `Workspace A`."
-        )
-        view = client.views_update.call_args.kwargs["view"]
-        assert "already waiting for admins in `Workspace A`" in view["blocks"][0]["text"]["text"]
-
-    def test_decline_names_primary(self):
-        from types import SimpleNamespace
-
-        from handlers.export_import import handle_pairing_request_decline
-
-        request = SimpleNamespace(id=9, status="pending")
-        with (
-            patch("handlers.export_import.helpers.is_primary_workspace", return_value=True),
-            patch("handlers.export_import.helpers.is_workspace_admin", return_value=True),
-            patch("handlers.export_import.DbManager.get_record", return_value=request),
-            patch("handlers.export_import.DbManager.update_records"),
-            patch("handlers.export_import._primary_workspace_code_tick", return_value="`Workspace A`"),
-            patch("handlers.export_import._dm_migration_requester") as requester_dm,
-        ):
-            handle_pairing_request_decline(
-                {"user": {"id": "U_ADMIN"}, "team": {"id": "T_PRIMARY"}, "actions": [{"value": "9"}]},
-                MagicMock(),
-                MagicMock(),
-                {},
-            )
-
-        text = requester_dm.call_args.args[1]
-        assert "Admins in `Workspace A` declined your request to export data and create a remote connection." in text
-        assert "You can still use Export for the file only." in text
-
-    def test_approve_opens_create_modal(self):
-        from types import SimpleNamespace
-
-        from handlers.export_import import handle_pairing_request_approve
-
-        request = SimpleNamespace(id=9, status="pending", subject_team_id="T_SRC")
-        source = SimpleNamespace(id=10, team_id="T_SRC", workspace_name="Workspace B")
-
-        def _get_record(model, id=None, **kwargs):
-            name = getattr(model, "__name__", "")
-            if name == "FederationPairingRequest":
-                return request
-            if name == "Workspace":
-                return source
-            return None
-
-        with (
-            patch("handlers.export_import.helpers.is_primary_workspace", return_value=True),
-            patch("handlers.export_import.helpers.is_workspace_admin", return_value=True),
-            patch("handlers.export_import.DbManager.get_record", side_effect=_get_record),
-            patch("handlers.export_import.helpers.resolve_workspace_name", return_value="Workspace B"),
-            patch("handlers.federation_cmds.open_create_external_connection_modal") as open_modal,
-        ):
-            handle_pairing_request_approve(
-                {
-                    "user": {"id": "U_ADMIN"},
-                    "team": {"id": "T_PRIMARY"},
-                    "trigger_id": "tr",
-                    "actions": [{"value": "9"}],
-                },
-                MagicMock(),
-                MagicMock(),
-                {},
-            )
-
-        open_modal.assert_called_once()
-        assert open_modal.call_args.kwargs["request_id"] == 9
-        assert open_modal.call_args.kwargs["exclude_workspace_id"] == 10
-        assert open_modal.call_args.kwargs["initial_name"] == "Workspace B"
-        assert open_modal.call_args.kwargs["leaving_workspace_name"] == "Workspace B"
 
 
 class TestDataMigrationImportConnect:
@@ -396,15 +257,6 @@ class TestDataMigrationImportConnect:
             },
         }
         workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
-        parsed = {
-            "code": "FED-AABBCCDD",
-            "webhook_url": "https://ws-a.example/api/federation",
-            "instance_id": "a" * 64,
-            "public_key": "pem",
-            "label": "Partner Org",
-            "primary_team_id": "TPRIMARY",
-            "primary_workspace_name": "Workspace A",
-        }
         body = {
             "user": {"id": "U1"},
             "team": {"id": "T1"},
@@ -429,7 +281,6 @@ class TestDataMigrationImportConnect:
             patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
             patch("handlers.export_import.DbManager.find_records", return_value=[]),
             patch("handlers.export_import.ei.verify_migration_signature", return_value=True),
-            patch("federation.core.parse_federation_code", return_value=parsed),
             patch("federation.core.initiate_federation_connect") as connect,
             patch("helpers._cache._cache_set") as cache_set,
         ):
@@ -442,8 +293,8 @@ class TestDataMigrationImportConnect:
         assert view["callback_id"] == actions.CONFIG_DATA_MIGRATION_REVIEW
         assert view["submit"]["text"] == "Import"
         text = str(view)
-        assert "Partner Org" in text
-        assert "Workspace A" in text
+        assert "Partner Org" not in text
+        assert "connection code" not in text
         assert "Workspace Group" in text
         assert "Synced Channels" in text
         assert "Mapped Users" in text
@@ -453,27 +304,43 @@ class TestDataMigrationImportConnect:
     def test_import_does_not_open_a_connection(self):
         from types import SimpleNamespace
 
-        from handlers.export_import import _ensure_migration_connection
+        from handlers.export_import import handle_data_migration_review
 
         payload = {
+            "version": 1,
             "source_instance": {
                 "webhook_url": "https://ws-a.example/api/federation",
                 "instance_id": "a" * 64,
                 "public_key": "pem",
                 "connection_code": "ENCODED_BLOB",
-            }
+            },
         }
         workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
         peer = SimpleNamespace(instance_id="a" * 64)
+        body = {"user": {"id": "U1"}, "view": {"id": "V1"}}
+        meta = {
+            "data": payload,
+            "group_id": 7,
+            "workspace_id": 1,
+            "team_id_to_workspace_id": {},
+        }
 
         for existing in ([], [peer]):
             with (
+                patch("handlers.export_import._is_admin", return_value=True),
+                patch("helpers._cache._cache_get", return_value=meta),
+                patch("handlers.export_import.helpers.get_workspace_by_id", return_value=workspace),
                 patch("federation.core.initiate_federation_connect") as connect,
                 patch("federation.core.get_or_create_instance") as create,
                 patch("handlers.export_import.DbManager.find_records", return_value=existing),
                 patch("handlers.export_import.DbManager.create_record") as insert,
+                patch("handlers.export_import.ei.import_migration_data"),
+                patch("handlers.export_import.helpers.consider_migration_release"),
+                patch("handlers.export_import.ei.invalidate_home_tab_caches_for_team"),
+                patch("handlers.export_import.builders.refresh_home_tab_for_workspace"),
+                patch("handlers.export_import.helpers.notify_user_dm"),
             ):
-                _ensure_migration_connection(payload, workspace, {})
+                handle_data_migration_review(body, MagicMock(), MagicMock(), {})
             connect.assert_not_called()
             create.assert_not_called()
             insert.assert_not_called()
@@ -507,13 +374,11 @@ class TestDataMigrationImportConnect:
             patch("handlers.export_import._is_admin", return_value=True),
             patch("helpers._cache._cache_get", return_value=meta),
             patch("handlers.export_import.helpers.get_workspace_by_id", return_value=workspace),
-            patch("handlers.export_import._ensure_migration_connection") as ensure,
             patch("handlers.export_import._run_migration_import") as run_import,
             patch("handlers.export_import.builders.refresh_home_tab_for_workspace"),
             patch("handlers.export_import.helpers.notify_user_dm") as dm,
         ):
             handle_data_migration_review(body, client, MagicMock(), {})
-        ensure.assert_called_once()
         run_import.assert_called_once()
         dm.assert_called_once()
         assert "Import finished" in dm.call_args.args[2]
@@ -551,7 +416,6 @@ class TestDataMigrationImportConnect:
             patch("handlers.export_import._is_admin", return_value=True),
             patch("helpers._cache._cache_get", return_value=meta),
             patch("handlers.export_import.helpers.get_workspace_by_id", return_value=workspace),
-            patch("handlers.export_import._ensure_migration_connection"),
             patch("handlers.export_import._run_migration_import", side_effect=RuntimeError("boom")),
             patch("handlers.export_import.helpers.notify_user_dm") as dm,
         ):

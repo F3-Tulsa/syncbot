@@ -899,12 +899,14 @@ class TestExternalConnectionModals:
         assert result["response_action"] == "errors"
         assert "select_join_external_workspaces" in result["errors"]
 
-    def test_create_ack_preserves_request_id(self):
+    def test_create_ack_ignores_older_request_metadata(self):
         from handlers.federation_cmds import handle_create_external_connection_submit_ack
 
         body = {
             "view": {
-                "private_metadata": json.dumps({"request_id": 9, "exclude_workspace_id": 10}),
+                "private_metadata": json.dumps(
+                    {"request_id": 9, "exclude_workspace_id": 10, "allow_empty_allowlist": True}
+                ),
                 "state": {
                     "values": {
                         "create_external_connection_name": {
@@ -920,10 +922,27 @@ class TestExternalConnectionModals:
         with patch("handlers.federation_cmds.helpers.federation_enabled", return_value=True):
             result = handle_create_external_connection_submit_ack(body, MagicMock(), {})
         meta = json.loads(result["view"]["private_metadata"])
-        assert meta["request_id"] == 9
-        assert meta["exclude_workspace_id"] == 10
-        assert meta["workspace_ids"] == [1]
-        assert 10 not in meta["workspace_ids"]
+        assert meta == {"label": "Partner Org", "workspace_ids": [1]}
+
+    def test_create_ack_requires_a_workspace(self):
+        from handlers.federation_cmds import handle_create_external_connection_submit_ack
+
+        body = {
+            "view": {
+                "private_metadata": json.dumps({"allow_empty_allowlist": True}),
+                "state": {
+                    "values": {
+                        "create_external_connection_name": {
+                            "create_external_connection_name": {"value": "Partner Org"}
+                        },
+                    }
+                },
+            }
+        }
+        with patch("handlers.federation_cmds.helpers.federation_enabled", return_value=True):
+            result = handle_create_external_connection_submit_ack(body, MagicMock(), {})
+        assert result["response_action"] == "errors"
+        assert "Select at least one Workspace." in result["errors"]["select_create_external_workspaces"]
 
     def test_workspaces_block_uses_multi_select(self):
         from handlers.federation_cmds import _workspaces_block
@@ -1010,10 +1029,9 @@ class TestExternalConnectionModals:
         assert generate.call_args.kwargs["workspace_ids"] == [10]
         assert "workspaces" not in generate.call_args.kwargs
 
-    def test_create_submit_from_request_sets_subject_and_fulfills(self):
+    def test_create_submit_ignores_older_request_metadata(self):
         from handlers.federation_cmds import handle_create_external_connection_submit
 
-        request = SimpleNamespace(id=9, status="pending", subject_team_id="T_SRC")
         body = {
             "user": {"id": "U_ADMIN"},
             "team": {"id": "T1"},
@@ -1025,41 +1043,27 @@ class TestExternalConnectionModals:
                         "workspace_ids": [1, 10],
                         "request_id": 9,
                         "exclude_workspace_id": 10,
+                        "allow_empty_allowlist": True,
                     }
                 ),
                 "state": {"values": {}},
             },
         }
         workspace = SimpleNamespace(id=1, team_id="T1")
-        order: list[str] = []
-
-        def track_modal(*_args, **_kwargs):
-            order.append("modal")
-
-        def track_fulfill(*_args, **_kwargs):
-            order.append("fulfill")
-
         with (
             patch("handlers.federation_cmds.helpers.federation_enabled", return_value=True),
             patch("handlers.federation_cmds._require_primary_admin", return_value=workspace),
-            patch("handlers.federation_cmds.DbManager.get_record", return_value=request),
             patch("handlers.federation_cmds.federation.get_public_url", return_value="https://me.example"),
             patch(
                 "handlers.federation_cmds.federation.generate_federation_code",
                 return_value=("ENCODED", "FED-1"),
             ) as generate,
-            patch("handlers.export_import.fulfill_pairing_request", side_effect=track_fulfill) as fulfill,
-            patch("handlers.federation_cmds._update_connection_code_modal", side_effect=track_modal),
+            patch("handlers.federation_cmds._update_connection_code_modal"),
             patch("handlers.federation_cmds.builders.refresh_home_tab_for_workspace"),
         ):
             handle_create_external_connection_submit(body, MagicMock(), MagicMock(), {})
-        assert generate.call_args.kwargs["subject_team_id"] == "T_SRC"
-        assert generate.call_args.kwargs["workspace_ids"] == [1]
-        fulfill.assert_called_once()
-        assert fulfill.call_args.args[0] is request
-        assert fulfill.call_args.kwargs["encoded"] == "ENCODED"
-        assert fulfill.call_args.kwargs["raw_code"] == "FED-1"
-        assert order == ["modal", "fulfill"]
+        assert "subject_team_id" not in generate.call_args.kwargs
+        assert generate.call_args.kwargs["workspace_ids"] == [1, 10]
 
     def test_edit_pending_opens_edit_modal(self):
         from handlers.federation_cmds import handle_edit_pending_external_connection

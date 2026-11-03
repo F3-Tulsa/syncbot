@@ -294,9 +294,9 @@ class UserMapping(BaseClass, GetDBClass):
 class FederationPairingCode(BaseClass, GetDBClass):
     """Pairing-only FED- code. Does not create a WorkspaceGroup.
 
-    ``subject_team_id`` null = operator External Connections code. Set = workspace-
-    scoped migration code (allowlist that Slack team). Both appear as waiting
-    External Connections until consumed or expired.
+    Create Connection leaves ``subject_team_id`` empty. A row from before that
+    change may still have it set. The code is a waiting External Connection
+    until it is consumed or expires.
     """
 
     __tablename__ = "federation_pairing_codes"
@@ -312,10 +312,7 @@ class FederationPairingCode(BaseClass, GetDBClass):
 
 
 class FederationPairingRequest(BaseClass, GetDBClass):
-    """Leaving-workspace admin asked primary admins for a pairing code.
-
-    At most one ``pending`` row per ``subject_team_id`` (enforced in handlers).
-    """
+    """Older rows only. Nothing creates a row."""
 
     __tablename__ = "federation_pairing_requests"
 

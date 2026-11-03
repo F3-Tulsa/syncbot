@@ -354,13 +354,8 @@ def _channel_in_migration_export(sync_channel) -> bool:
     return status not in _EXPORT_SKIP_CHANNEL_STATUSES
 
 
-def build_migration_export(
-    workspace_id: int,
-    include_source_instance: bool = False,
-    *,
-    connection_code: str | None = None,
-) -> dict:
-    """Build workspace-scoped migration JSON. Optionally sign with Ed25519 and include source_instance."""
+def build_migration_export(workspace_id: int) -> dict:
+    """Build workspace-scoped migration JSON and sign it with Ed25519."""
     workspace = get_workspace_by_id(workspace_id)
     if not workspace or workspace.deleted_at:
         raise ValueError("Workspace not found")
@@ -565,24 +560,6 @@ def build_migration_export(
         "user_mappings": user_mappings_data,
     }
 
-    if include_source_instance:
-        from federation import core as federation
-
-        try:
-            endpoint = federation.federation_endpoint_url()
-            instance_id = federation.get_instance_id()
-            _, public_key_pem = federation.get_or_create_instance_keypair()
-            if endpoint:
-                payload["source_instance"] = {
-                    "webhook_url": endpoint,
-                    "instance_id": instance_id,
-                    "public_key": public_key_pem,
-                }
-                if connection_code:
-                    payload["source_instance"]["connection_code"] = connection_code
-        except Exception as e:
-            log_warning("build_migration_export", error=str(e))
-
     # Sign with Ed25519 (exclude signature from signed bytes; include signed_at)
     try:
         from federation import core as federation
@@ -598,8 +575,6 @@ def build_migration_export(
         "migration_export",
         team_id=team_id,
         signed=bool(payload.get("signature")),
-        has_source_instance=bool(payload.get("source_instance")),
-        has_connection_code=bool((payload.get("source_instance") or {}).get("connection_code")),
         groups=len(groups_data),
         syncs=len(syncs_data),
         channels=len(sync_channels_data),

@@ -261,22 +261,13 @@ CONFIG_DATA_MIGRATION_SUBMIT = "data_migration_submit"
 """Callback: Data Migration modal submitted (import migration file)."""
 
 CONFIG_DATA_MIGRATION_REVIEW = "data_migration_review"
-"""Callback: Data Migration review modal submitted (connect + import)."""
+"""Callback: Data Migration review modal submitted."""
 
 CONFIG_DATA_MIGRATION_PROCEED = "data_migration_proceed"
 """Action: danger button to proceed with import despite warnings."""
 
 CONFIG_DATA_MIGRATION_EXPORT = "data_migration_export"
 """Action: user clicked Export in Data Migration modal."""
-
-CONFIG_DATA_MIGRATION_REQUEST = "data_migration_request"
-"""Action: workspace admin clicked Export and Request Connection."""
-
-CONFIG_PAIRING_REQUEST_APPROVE = "pairing_request_approve"
-"""Action: primary admin approved a migration pairing request (prefix-matched with request ID)."""
-
-CONFIG_PAIRING_REQUEST_DECLINE = "pairing_request_decline"
-"""Action: primary admin declined a migration pairing request (prefix-matched with request ID)."""
 
 CONFIG_DATA_MIGRATION_JSON_INPUT = "data_migration_json_input"
 """Input: uploaded JSON file in Data Migration modal."""

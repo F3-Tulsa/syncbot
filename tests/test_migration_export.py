@@ -27,7 +27,7 @@ class TestBuildMigrationExportWorkspaceLookup:
             patch("helpers.export_import.os.environ.get", return_value=""),
             caplog.at_level(logging.DEBUG, logger="syncbot"),
         ):
-            payload = build_migration_export(42, include_source_instance=False)
+            payload = build_migration_export(42)
 
         get_ws.assert_called_with(42)
         assert payload["workspace"] == {"team_id": "T1", "workspace_name": "Workspace A"}
@@ -36,6 +36,8 @@ class TestBuildMigrationExportWorkspaceLookup:
         assert payload["version"] == 1
         assert payload["syncbot_version"]
         assert "federation_file_parts" not in payload
+        assert "source_instance" not in payload
+        assert "connection_code" not in payload
         assert any(
             record.message == "migration_export" and record.__dict__.get("team_id") == "T1" for record in caplog.records
         )
@@ -96,7 +98,7 @@ class TestBuildMigrationExportWorkspaceLookup:
                 side_effect=lambda model, *args, **kwargs: group if model.__name__ == "WorkspaceGroup" else sync,
             ),
         ):
-            payload = build_migration_export(42, include_source_instance=False)
+            payload = build_migration_export(42)
 
         assert payload["sync_channels"] == [
             {
@@ -185,7 +187,7 @@ class TestBuildMigrationExportWorkspaceLookup:
                 side_effect=lambda model, *args, **kwargs: group if model.__name__ == "WorkspaceGroup" else sync,
             ),
         ):
-            payload = build_migration_export(42, include_source_instance=False)
+            payload = build_migration_export(42)
 
         channels = {(row["team_id"], row["channel_id"]) for row in payload["sync_channels"]}
         assert channels == {("T1", "C1"), ("T-PEER", "C-PEER")}
@@ -587,7 +589,7 @@ def test_export_omits_a_disbanded_group_and_a_group_this_workspace_left(real_db)
     from helpers.export_import import build_migration_export
 
     local = _export_rows()
-    payload = build_migration_export(local.id, include_source_instance=False)
+    payload = build_migration_export(local.id)
     assert [group["uid"] for group in payload["groups"]] == ["live-uid"]
     assert payload["groups"][0]["member_team_ids"] == ["TB"]
     channels = {row["channel_id"] for row in payload["sync_channels"]}

@@ -2086,7 +2086,7 @@ def test_export_includes_paused_remote_post_meta(real_db):
     peer = _seed_peer()
     _sync, _local_sc, _stub_sc = _seed_shared_sync(peer)
     soft_delete_workspace(peer["stub"])
-    payload = build_migration_export(peer["local"].id, include_source_instance=False)
+    payload = build_migration_export(peer["local"].id)
     channels = {(row["team_id"], row["channel_id"]) for row in payload["sync_channels"]}
     assert ("TSTUB", "CSTUB") not in channels
     assert "44444444-4444-4444-4444-444444444444:CSTUB" not in payload["post_meta"]
