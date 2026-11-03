@@ -15,7 +15,7 @@ from db import DbManager, schemas
 from handlers._common import _close_modal_done, _update_wait_modal, _wait_modal_ack
 from helpers import export_import as ei
 from helpers.workspace import invalidate_fed_ws_for_sync_cache
-from logger import log_debug, log_error, log_warning
+from logger import log_error, log_info, log_warning
 from slack import actions, orm
 
 # Uploaded JSON (backup / migration) download timeout — size follows Slack's per-file max.
@@ -974,92 +974,17 @@ def _ensure_migration_connection(
     workspace_record,
     context: dict,
 ) -> None:
-    """Join from the bundled connection code, or attach locally if already paired."""
+    """A migration file does not open or change an External Connection."""
+    del workspace_record, context
     source = data.get("source_instance")
-    if not source:
+    if not isinstance(source, dict) or not source.get("connection_code"):
         return
-    encoded = source.get("connection_code")
-    if not encoded:
-        log_debug(
-            "federation_pair",
-            direction="outbound",
-            ok=False,
-            reason="no_connection_code",
-            team_id=workspace_record.team_id,
-            peer_instance_id=source.get("instance_id"),
-        )
-        return
-    from federation import core as federation
-
-    parsed = federation.parse_federation_code(encoded)
-    if not parsed:
-        log_warning(
-            "federation_pair",
-            direction="outbound",
-            ok=False,
-            reason="invalid_connection_code",
-            team_id=workspace_record.team_id,
-            peer_instance_id=source.get("instance_id"),
-        )
-        return
-    remote_instance_id = parsed["instance_id"]
-    existing = DbManager.find_records(
-        schemas.Instance,
-        [
-            schemas.Instance.instance_id == remote_instance_id,
-            schemas.Instance.status == "active",
-        ],
+    log_info(
+        "federation_pair",
+        direction="outbound",
+        ok=False,
+        reason="import_does_not_connect",
     )
-    result = None
-    if not existing:
-        result = federation.initiate_federation_connect(
-            parsed["webhook_url"],
-            parsed["code"],
-            team_id=workspace_record.team_id,
-            workspace_name=workspace_record.workspace_name or None,
-            context=context,
-        )
-        if not result or not result.get("ok"):
-            log_warning(
-                "federation_pair",
-                direction="outbound",
-                ok=False,
-                reason="connect_failed_using_blob",
-                team_id=workspace_record.team_id,
-                peer_instance_id=remote_instance_id,
-            )
-    remote_team_id = result.get("team_id") if result and isinstance(result.get("team_id"), str) else None
-    remote_workspace_name = None
-    if result and isinstance(result.get("workspace_name"), str):
-        remote_workspace_name = result.get("workspace_name")
-    if remote_team_id:
-        remote_team_id = remote_team_id.strip() or None
-    remote_name = (parsed.get("label") or "").strip() or f"Connection {remote_instance_id[:8]}"
-    primary_name = (parsed.get("primary_workspace_name") or "").strip() or None
-    primary_team = (parsed.get("primary_team_id") or "").strip() or None
-    fed_ws = federation.get_or_create_instance(
-        instance_id=remote_instance_id,
-        webhook_url=parsed["webhook_url"],
-        public_key=(result.get("public_key") if result else None) or parsed["public_key"],
-        name=remote_name,
-        primary_team_id=primary_team or remote_team_id,
-        primary_workspace_name=primary_name or remote_workspace_name,
-    )
-    existing_allow = DbManager.find_records(
-        schemas.FederationWorkspaceAllowlist,
-        [
-            schemas.FederationWorkspaceAllowlist.instance_id == fed_ws.instance_id,
-            schemas.FederationWorkspaceAllowlist.workspace_id == workspace_record.id,
-        ],
-    )
-    if not existing_allow:
-        DbManager.create_record(
-            schemas.FederationWorkspaceAllowlist(
-                instance_id=fed_ws.instance_id,
-                workspace_id=workspace_record.id,
-            )
-        )
-    invalidate_fed_ws_for_sync_cache()
 
 
 def _run_migration_import(

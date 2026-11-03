@@ -450,7 +450,7 @@ class TestDataMigrationImportConnect:
         assert "Synced Messages" in text
         assert "Announcements" in text
 
-    def test_ensure_skips_pair_when_peer_exists(self):
+    def test_import_does_not_open_a_connection(self):
         from types import SimpleNamespace
 
         from handlers.export_import import _ensure_migration_connection
@@ -464,31 +464,19 @@ class TestDataMigrationImportConnect:
             }
         }
         workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
-        parsed = {
-            "code": "FED-AABBCCDD",
-            "webhook_url": "https://ws-a.example/api/federation",
-            "instance_id": "a" * 64,
-            "public_key": "pem",
-            "label": "Partner Org",
-        }
         peer = SimpleNamespace(instance_id="a" * 64)
 
-        def find_records(model, _filters):
-            name = getattr(model, "__name__", "")
-            if name == "Instance":
-                return [peer]
-            return [object()]
-
-        with (
-            patch("federation.core.parse_federation_code", return_value=parsed),
-            patch("federation.core.initiate_federation_connect") as connect,
-            patch("federation.core.get_or_create_instance", return_value=peer),
-            patch("handlers.export_import.DbManager.find_records", side_effect=find_records),
-            patch("handlers.export_import.invalidate_fed_ws_for_sync_cache"),
-        ):
-            _ensure_migration_connection(payload, workspace, {})
-
-        connect.assert_not_called()
+        for existing in ([], [peer]):
+            with (
+                patch("federation.core.initiate_federation_connect") as connect,
+                patch("federation.core.get_or_create_instance") as create,
+                patch("handlers.export_import.DbManager.find_records", return_value=existing),
+                patch("handlers.export_import.DbManager.create_record") as insert,
+            ):
+                _ensure_migration_connection(payload, workspace, {})
+            connect.assert_not_called()
+            create.assert_not_called()
+            insert.assert_not_called()
 
     def test_review_ack_keeps_wait_modal(self):
         from handlers._common import _DM_WAIT_TEXT
