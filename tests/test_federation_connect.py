@@ -719,6 +719,49 @@ class TestExternalConnectionModals:
         assert result["response_action"] == "errors"
         assert "this SyncBot install" in result["errors"]["join_external_connection_code"]
 
+    def test_join_review_refuses_a_different_response_key(self):
+        from handlers.federation_cmds import handle_join_external_connection_review
+
+        _, code_pem = _keypair()
+        _, other_pem = _keypair()
+        code_id = federation_core.public_key_fingerprint(code_pem)
+        payload = {
+            "code": "FED-ABCD1234",
+            "webhook_url": "https://peer.example/api/federation",
+            "instance_id": code_id,
+            "public_key": code_pem,
+            "label": "Partner Org",
+        }
+        body = {
+            "user": {"id": "U1"},
+            "team": {"id": "T1"},
+            "view": {
+                "private_metadata": json.dumps({"code": "ENCODED"}),
+                "state": {
+                    "values": {
+                        "select_join_external_workspaces": {
+                            "select_join_external_workspaces": {"selected_options": [{"value": "1"}]}
+                        }
+                    }
+                },
+            },
+        }
+        workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
+        with (
+            patch("handlers.federation_cmds.helpers.federation_enabled", return_value=True),
+            patch("handlers.federation_cmds._require_primary_admin", return_value=workspace),
+            patch("handlers.federation_cmds.federation.parse_federation_code", return_value=payload),
+            patch(
+                "handlers.federation_cmds.federation.initiate_federation_connect",
+                return_value={"ok": True, "public_key": other_pem},
+            ),
+            patch("handlers.federation_cmds.federation.get_or_create_instance") as create,
+            patch("handlers.federation_cmds._dm_actor"),
+            patch("handlers.federation_cmds._close_modal_done"),
+        ):
+            handle_join_external_connection_review(body, MagicMock(), MagicMock(), {})
+        create.assert_not_called()
+
     def test_create_ack_keeps_modal_open(self):
         from handlers._common import _DM_WAIT_TEXT
         from handlers.federation_cmds import handle_create_external_connection_submit_ack

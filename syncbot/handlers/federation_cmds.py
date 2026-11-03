@@ -799,7 +799,15 @@ def handle_join_external_connection_review(
         _close_modal_done(client, body, connect_failed)
         return
 
-    remote_public_key = result.get("public_key", "")
+    response_key = result.get("public_key") if isinstance(result.get("public_key"), str) else ""
+    if response_key and not federation.instance_id_matches_public_key(remote_instance_id, response_key):
+        key_mismatch = (
+            f":warning: Could not connect to `{remote_name}`. Ask the other admin to create a new connection code."
+        )
+        _dm_actor(client, body, key_mismatch)
+        _close_modal_done(client, body, key_mismatch)
+        return
+
     remote_team_id = result.get("team_id") if isinstance(result.get("team_id"), str) else None
     remote_workspace_name = result.get("workspace_name") if isinstance(result.get("workspace_name"), str) else None
     if remote_team_id:
@@ -808,7 +816,7 @@ def handle_join_external_connection_review(
     fed_ws = federation.get_or_create_instance(
         instance_id=remote_instance_id,
         webhook_url=remote_url,
-        public_key=remote_public_key,
+        public_key=payload["public_key"],
         name=remote_name,
         primary_team_id=primary_team or remote_team_id,
         primary_workspace_name=primary_name or remote_workspace_name,
