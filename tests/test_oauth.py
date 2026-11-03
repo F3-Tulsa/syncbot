@@ -196,17 +196,6 @@ class TestGetPublicBaseUrl:
         ):
             assert get_public_base_url() is None
 
-    def test_lambda_event_uses_request_context_domain(self):
-        from helpers.oauth import public_base_from_lambda_event
-
-        with patch("helpers.oauth.constants.LOCAL_DEVELOPMENT", False):
-            assert (
-                public_base_from_lambda_event(
-                    {"requestContext": {"domainName": "abc.lambda-url.us-east-1.on.aws"}, "headers": {}}
-                )
-                == "https://abc.lambda-url.us-east-1.on.aws"
-            )
-
 
 class TestRefreshHomeAfterOauthInstall:
     def test_publishes_home_for_the_authorizing_user(self):

@@ -57,7 +57,6 @@ ACTION_MAPPER = {
     actions.CONFIG_BACKUP_RESTORE_PROCEED: handlers.handle_backup_restore_proceed,
     actions.CONFIG_DATA_MIGRATION: handlers.handle_data_migration,
     actions.CONFIG_DATA_MIGRATION_EXPORT: handlers.handle_data_migration_export,
-    actions.CONFIG_DATA_MIGRATION_PROCEED: handlers.handle_data_migration_proceed,
     actions.CONFIG_OPEN_SETTINGS: handlers.handle_open_settings,
     actions.CONFIG_DB_RESET: handlers.handle_db_reset,
     actions.CONFIG_DB_RESET_PROCEED: handlers.handle_db_reset_proceed,

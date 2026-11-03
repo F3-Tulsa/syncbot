@@ -1048,16 +1048,3 @@ def handle_data_migration_review(
         user_id=user_id,
         finish_here=_migration_finish_choice(body) == "finish",
     )
-
-
-def handle_data_migration_proceed(
-    body: dict,
-    client: WebClient,
-    logger: Logger,
-    context: dict,
-) -> None:
-    """Proceed with import after user clicked the danger button despite warnings."""
-    user_id = helpers.get_user_id_from_body(body)
-    if not _is_admin(client, user_id, body):
-        return
-    _complete_data_migration_import(body, client, logger, context, user_id=user_id, finish_here=False)

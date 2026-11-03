@@ -117,25 +117,6 @@ def public_base_from_headers(headers: dict | None) -> str | None:
     return _origin_from_host(host, headers)
 
 
-def public_base_from_lambda_event(event: dict | None) -> str | None:
-    """Return the public origin from a Lambda Function URL / API Gateway event.
-
-    Prefers Host / X-Forwarded-Host headers, then ``requestContext.domainName``
-    (Function URL payload 2.0).
-    """
-    if not event:
-        return None
-    headers = event.get("headers") or {}
-    from_headers = public_base_from_headers(headers)
-    if from_headers:
-        return from_headers
-    request_context = event.get("requestContext") or {}
-    domain = request_context.get("domainName")
-    if isinstance(domain, str) and domain.strip():
-        return _origin_from_host(domain.strip(), headers)
-    return None
-
-
 def remember_public_base(url: str | None) -> str | None:
     """Store *url* for later :func:`get_public_base_url` calls in this process and the DB."""
     base = (url or "").strip().rstrip("/")
@@ -160,21 +141,13 @@ def capture_public_base(headers: dict | None, context: dict | None = None) -> st
     return base
 
 
-def capture_public_base_from_lambda_event(event: dict | None, context: dict | None = None) -> str | None:
-    """Remember the Function URL origin (Host header or ``requestContext.domainName``)."""
-    base = remember_public_base(public_base_from_lambda_event(event))
-    if base and context is not None:
-        context["public_base_url"] = base
-    return base
-
-
 def get_public_base_url(context: dict | None = None) -> str | None:
     """Return this instance's public HTTPS origin (no trailing slash).
 
-    Prefers the current Slack request (``context["public_base_url"]``), then
-    the origin remembered from an earlier request on this warm process, then
-    the last Host persisted in ``instance_settings``. ``SYNCBOT_PUBLIC_URL`` is
-    ignored leftover deploy config.
+    The current Slack request's ``context["public_base_url"]`` comes first.
+    Then, only after ``capture_public_base`` has run in this process, the origin
+    remembered in this process, then the Host saved in ``instance_settings``.
+    Otherwise ``None``. ``SYNCBOT_PUBLIC_URL`` is ignored leftover deploy config.
     """
     _warn_legacy_public_url_env()
     if context:

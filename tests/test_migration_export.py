@@ -378,17 +378,6 @@ def test_import_without_source_instance_skips_unknown_peer_channels():
     assert posts == []
 
 
-def test_import_unknown_source_instance_does_not_guess_sole_trusted_peer():
-    from helpers.export_import import _peer_instance_id_from_migration
-
-    with (
-        patch("helpers.export_import.DbManager.find_records", return_value=[]),
-        patch("helpers.export_import._sole_trusted_peer_instance_id") as sole,
-    ):
-        assert _peer_instance_id_from_migration({"source_instance": {"instance_id": "other-fp"}}) is None
-        sole.assert_not_called()
-
-
 def test_import_post_meta_onto_peer_stub_channels():
     data = {
         "source_instance": {"instance_id": "peer-fp"},

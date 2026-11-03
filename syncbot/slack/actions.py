@@ -266,9 +266,6 @@ CONFIG_DATA_MIGRATION_REVIEW = "data_migration_review"
 CONFIG_DATA_MIGRATION_FINISH = "data_migration_finish"
 """Input: Confirm Import radio, ``wait`` or ``finish``."""
 
-CONFIG_DATA_MIGRATION_PROCEED = "data_migration_proceed"
-"""Action: danger button to proceed with import despite warnings."""
-
 CONFIG_DATA_MIGRATION_EXPORT = "data_migration_export"
 """Action: user clicked Export in Data Migration modal."""
 

@@ -727,29 +727,6 @@ class TestDataMigrationImportConnect:
             handle_data_migration_review(body, client, MagicMock(), {})
         assert "these Syncs are active" in dm.call_args.args[2]
 
-    def test_proceed_waits_for_the_other_install(self):
-        from types import SimpleNamespace
-
-        from handlers.export_import import handle_data_migration_proceed
-
-        workspace = SimpleNamespace(id=1, team_id="T1")
-        body = {"user": {"id": "U1"}, "view": {"id": "V1"}}
-        meta = {"data": {"version": 1}, "group_id": 7, "workspace_id": 1, "team_id_to_workspace_id": {}}
-        with (
-            patch("handlers.export_import._is_admin", return_value=True),
-            patch("helpers._cache._cache_get", return_value=meta),
-            patch("handlers.export_import.helpers.get_workspace_by_id", return_value=workspace),
-            patch(
-                "handlers.export_import.helpers.consider_migration_release", return_value="waiting_for_connection"
-            ) as release,
-            patch("handlers.export_import._run_migration_import"),
-            patch("handlers.export_import.builders.refresh_home_tab_for_workspace"),
-            patch("handlers.export_import.helpers.notify_user_dm"),
-            patch("handlers.export_import.helpers.federation_enabled", return_value=True),
-        ):
-            handle_data_migration_proceed(body, MagicMock(), MagicMock(), {})
-        assert release.call_args.kwargs["finish_here"] is False
-
     def test_review_import_dms_when_expired(self):
         from handlers.export_import import handle_data_migration_review
 

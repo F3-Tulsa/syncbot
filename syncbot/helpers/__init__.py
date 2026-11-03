@@ -113,11 +113,9 @@ from helpers.notifications import (
 )
 from helpers.oauth import (
     capture_public_base,
-    capture_public_base_from_lambda_event,
     get_oauth_flow,
     get_public_base_url,
     public_base_from_headers,
-    public_base_from_lambda_event,
     remember_public_base,
 )
 from helpers.post_meta import (
@@ -335,9 +333,7 @@ __all__ = [
     "get_oauth_flow",
     "get_public_base_url",
     "capture_public_base",
-    "capture_public_base_from_lambda_event",
     "public_base_from_headers",
-    "public_base_from_lambda_event",
     "remember_public_base",
     "normalize_display_name",
     "get_own_bot_id",

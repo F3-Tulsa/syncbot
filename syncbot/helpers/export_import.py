@@ -614,36 +614,6 @@ def verify_migration_signature(data: dict) -> bool:
     return federation.verify_body(raw, sig, public_key)
 
 
-def _peer_instance_id_from_migration(data: dict) -> str | None:
-    source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else None
-    instance_id = str((source or {}).get("instance_id") or "").strip()
-    if instance_id:
-        peers = DbManager.find_records(
-            schemas.Instance,
-            [schemas.Instance.instance_id == instance_id],
-        )
-        if peers and not getattr(peers[0], "private_key_encrypted", None):
-            return instance_id
-        return None
-    return _sole_trusted_peer_instance_id()
-
-
-def _sole_trusted_peer_instance_id() -> str | None:
-    """The only trusted External Connection, if this instance has exactly one."""
-    peers = DbManager.find_records(
-        schemas.Instance,
-        [
-            schemas.Instance.private_key_encrypted.is_(None),
-            schemas.Instance.status == "active",
-            schemas.Instance.trust_status == "trusted",
-        ],
-    )
-    ids = [str(peer.instance_id).strip() for peer in peers if getattr(peer, "instance_id", None)]
-    if len(ids) != 1:
-        return None
-    return ids[0]
-
-
 def _workspace_id_for_imported_team(
     team_id: str | None,
     *,
