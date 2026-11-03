@@ -828,20 +828,24 @@ def restore_migrated_workspace(team_id: str, *, context: dict | None = None) -> 
     )
 
 
-def peer_still_hosts_team(team_id: str) -> bool:
-    """True when a trusted peer still has *team_id* live, or cannot be asked.
+def migration_peer_hold(team_id: str) -> str:
+    """``no_peer``, ``still_hosted``, or ``released`` for a moved Workspace.
 
-    No trusted peer means this instance is the only one, so the team is not held.
+    A missing team, a missing Workspace, or a Workspace that is not local is
+    ``released`` and does not call ``/teams``. No trusted peer is ``no_peer``.
+    A trusted peer that cannot be reached, or that answers ``refused_live`` or
+    nothing, is ``still_hosted``. Every trusted peer reporting the team already
+    gone is ``released``.
     """
     from federation.core import push_teams, teams_allowlist_payload
     from helpers.workspace_kind import is_local_workspace, peer_is_trusted
 
     team_id = (team_id or "").strip()
     if not team_id:
-        return False
+        return "released"
     workspace = DbManager.get_record(schemas.Workspace, id=team_id)
     if workspace is None or not is_local_workspace(workspace):
-        return False
+        return "released"
     peers = DbManager.find_records(
         schemas.Instance,
         [
@@ -851,7 +855,7 @@ def peer_still_hosts_team(team_id: str) -> bool:
     )
     peers = [peer for peer in peers if peer_is_trusted(peer)]
     if not peers:
-        return False
+        return "no_peer"
     for peer in peers:
         payload = teams_allowlist_payload(peer.instance_id)
         listed = payload.setdefault("workspaces", [])
@@ -859,30 +863,43 @@ def peer_still_hosts_team(team_id: str) -> bool:
             listed.append({"team_id": team_id, "name": workspace.workspace_name or team_id})
         result = push_teams(peer, payload)
         if not result:
-            return True
+            return "still_hosted"
         answer = (result.get("results") or {}).get(team_id)
         if answer in ("refused_live", None):
-            return True
-    return False
+            return "still_hosted"
+    return "released"
 
 
-def consider_migration_release(team_id: str) -> None:
-    """Ask trusted peers whether *team_id* is still live there, then restore if not.
+def peer_still_hosts_team(team_id: str) -> bool:
+    """True when a trusted peer still has *team_id* live, or cannot be asked.
 
-    A peer that cannot be reached counts as still live. No trusted peer means
-    this instance is the only one, so the rows resume at once.
+    No trusted peer means this instance is the only one, so the team is not held.
+    """
+    return migration_peer_hold(team_id) == "still_hosted"
+
+
+def consider_migration_release(team_id: str, *, finish_here: bool) -> str:
+    """Hold or resume pending Channels after import.
+
+    Returns ``resumed``, ``waiting_for_connection``, or ``waiting_for_uninstall``.
+    A peer that still has the team always waits. With no peer, ``finish_here``
+    resumes and waiting leaves the Channels pending. A released team resumes.
     """
     from helpers.workspace_kind import is_local_workspace
 
     team_id = (team_id or "").strip()
     if not team_id:
-        return
+        return "resumed"
     workspace = DbManager.get_record(schemas.Workspace, id=team_id)
     if workspace is None or not is_local_workspace(workspace):
-        return
-    if peer_still_hosts_team(team_id):
-        return
-    restore_migrated_workspace(team_id)
+        return "resumed"
+    hold = migration_peer_hold(team_id)
+    if hold == "still_hosted":
+        return "waiting_for_uninstall"
+    if hold == "released" or finish_here:
+        restore_migrated_workspace(team_id)
+        return "resumed"
+    return "waiting_for_connection"
 
 
 def apply_teams_release_results(results: dict | None) -> None:

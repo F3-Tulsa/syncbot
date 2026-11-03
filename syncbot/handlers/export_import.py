@@ -722,9 +722,6 @@ def _run_migration_import(
         group_id,
         team_id_to_workspace_id=team_id_to_workspace_id,
     )
-    restored = helpers.get_workspace_by_id(workspace_record.id) or workspace_record
-    if getattr(restored, "team_id", None):
-        helpers.consider_migration_release(restored.team_id)
     ei.invalidate_home_tab_caches_for_team(workspace_record.team_id)
 
 
@@ -791,45 +788,112 @@ def _import_connect_instruction() -> str:
     )
 
 
-def _import_missing_workspace_text(names: list[str], *, finished: bool) -> str:
+def _missing_channels_clause(names: list[str]) -> str:
     label = _format_workspace_names(names)
     verb = "is" if len(names) == 1 else "are"
     channels = "its Channels" if len(names) == 1 else "their Channels"
+    return f"{label} {verb} not on this install, so {channels} were not imported."
+
+
+def _import_missing_workspace_text(names: list[str], *, finished: bool) -> str:
+    clause = _missing_channels_clause(names)
     connect = _import_connect_instruction()
     if finished:
-        return (
-            ":white_check_mark: Import finished. :warning: "
-            f"{label} {verb} not on this install, so {channels} were not imported. {connect}"
-        )
+        return f":white_check_mark: Import finished. :warning: {clause} {connect}"
     return (
-        f":warning: {label} {verb} not on this install. "
+        f":warning: {_format_workspace_names(names)} "
+        f"{'is' if len(names) == 1 else 'are'} not on this install. "
         "Import keeps this Workspace's Groups and Syncs and leaves out "
-        f"{channels}. {connect}"
+        f"{'its Channels' if len(names) == 1 else 'their Channels'}. {connect}"
     )
 
 
-def _workspace_is_waiting_for_migration(workspace_id: int) -> bool:
-    rows = DbManager.find_records(
-        schemas.SyncChannel,
-        [
-            schemas.SyncChannel.workspace_id == workspace_id,
-            schemas.SyncChannel.deleted_at.is_(None),
-            schemas.SyncChannel.status == "pending",
-        ],
+_IMPORT_FINISH_HELP = (
+    "How should this import finish?\n"
+    "*Wait for the other install.* This Workspace's Syncs stay `Waiting for migration` "
+    "until an External Connection exists and the old instance uninstalls SyncBot.\n"
+    "*Finish on this install.* This Workspace is not still installed on another SyncBot, "
+    "so the Syncs resume now."
+)
+
+
+def _migration_finish_block() -> orm.InputBlock:
+    initial = "wait" if helpers.federation_enabled() else "finish"
+    return orm.InputBlock(
+        label="How this import finishes",
+        action=actions.CONFIG_DATA_MIGRATION_FINISH,
+        optional=False,
+        element=orm.RadioButtonsElement(
+            initial_value=initial,
+            options=[
+                orm.SelectorOption(name="Wait for the other install", value="wait"),
+                orm.SelectorOption(name="Finish on this install", value="finish"),
+            ],
+        ),
     )
-    return bool(rows)
 
 
-def _import_finished_text(data: dict, workspace) -> str:
+def _migration_finish_choice(body: dict) -> str | None:
+    value = helpers.safe_get(
+        body,
+        "view",
+        "state",
+        "values",
+        actions.CONFIG_DATA_MIGRATION_FINISH,
+        actions.CONFIG_DATA_MIGRATION_FINISH,
+        "selected_option",
+        "value",
+    )
+    if value in ("wait", "finish"):
+        return value
+    return None
+
+
+def _import_finished_text(data: dict, workspace, release: str, *, finish_here: bool) -> str:
     missing = _migration_workspace_names_not_here(data, getattr(workspace, "team_id", "") or "")
-    if missing:
-        return _import_missing_workspace_text(missing, finished=True)
-    if _workspace_is_waiting_for_migration(workspace.id):
-        return (
-            ":white_check_mark: Import finished. This Workspace stays `Waiting for migration` "
-            "until the old instance uninstalls SyncBot."
+    if release == "waiting_for_connection":
+        held = (
+            ":white_check_mark: Import finished. :warning: This install has no External Connection, "
+            "so this Workspace stays `Waiting for migration`."
         )
-    return ":white_check_mark: Import finished."
+        if missing:
+            turn_on = ""
+            if not helpers.federation_enabled():
+                turn_on = "turns Federation on in Settings, then "
+            return (
+                f"{held} {_missing_channels_clause(missing)} "
+                f"A primary Workspace admin {turn_on}uses Create Connection, the other install uses Join, "
+                "then import this file again. The old instance uninstalls SyncBot before those Syncs resume."
+            )
+        return (
+            f"{held} A primary Workspace admin "
+            f"{'' if helpers.federation_enabled() else 'turns Federation on in Settings, then '}"
+            "uses Create Connection, the other install uses Join, "
+            "and the old instance uninstalls SyncBot before those Syncs resume."
+        )
+    if release == "waiting_for_uninstall":
+        text = (
+            ":white_check_mark: Import finished. :warning: The other install still has this Workspace, "
+            "so these Syncs stay `Waiting for migration` until that install uninstalls SyncBot."
+        )
+        if missing:
+            where = "that Workspace" if len(missing) == 1 else "those Workspaces"
+            text += (
+                f" :warning: {_missing_channels_clause(missing)} "
+                f"Import this file again after {where} is on this install."
+            )
+        return text
+    if finish_here:
+        if missing:
+            return _import_missing_workspace_text(missing, finished=True)
+        return ":white_check_mark: Import finished."
+    text = (
+        ":white_check_mark: Import finished. The old instance already uninstalled SyncBot, so these Syncs are active."
+    )
+    if missing:
+        warning = _import_missing_workspace_text(missing, finished=True).split(":warning: ", 1)[1]
+        text += f" :warning: {warning}"
+    return text
 
 
 def handle_data_migration_submit_ack(
@@ -872,6 +936,8 @@ def handle_data_migration_submit_ack(
     missing = _migration_workspace_names_not_here(data, workspace_record.team_id)
     if missing:
         blocks.append(section(_import_missing_workspace_text(missing, finished=False)))
+    blocks.append(section(_IMPORT_FINISH_HELP))
+    blocks.append(_migration_finish_block())
     blocks.extend(_migration_overview_blocks(data))
     review = orm.BlockView(blocks=blocks)
     return {
@@ -891,6 +957,11 @@ _IMPORT_EXPIRED_TEXT = ":warning: That import expired. Try the import again."
 
 def handle_data_migration_review_ack(body: dict, client: WebClient, context: dict) -> dict | None:
     """Keep the modal open while import runs."""
+    if _migration_finish_choice(body) is None:
+        return {
+            "response_action": "errors",
+            "errors": {actions.CONFIG_DATA_MIGRATION_FINISH: "Choose how to finish this import."},
+        }
     return _wait_modal_ack(
         title="Confirm Import",
         callback_id=actions.CONFIG_DATA_MIGRATION_REVIEW,
@@ -910,6 +981,7 @@ def _complete_data_migration_import(
     context: dict,
     *,
     user_id: str | None,
+    finish_here: bool,
 ) -> None:
     if not user_id:
         return
@@ -941,6 +1013,9 @@ def _complete_data_migration_import(
             acting_user_id=user_id,
             context=context,
         )
+        release = "resumed"
+        if getattr(workspace_record, "team_id", None):
+            release = helpers.consider_migration_release(workspace_record.team_id, finish_here=finish_here)
         builders.refresh_home_tab_for_workspace(
             workspace_record,
             logger,
@@ -951,7 +1026,12 @@ def _complete_data_migration_import(
         log_error("data_migration_import_failed", user_id=user_id, exc_info=True)
         _notify_import_result(client, body, user_id, _IMPORT_FAIL_TEXT)
         return
-    _notify_import_result(client, body, user_id, _import_finished_text(data, workspace_record))
+    _notify_import_result(
+        client,
+        body,
+        user_id,
+        _import_finished_text(data, workspace_record, release, finish_here=finish_here),
+    )
 
 
 def handle_data_migration_review(
@@ -964,7 +1044,14 @@ def handle_data_migration_review(
     user_id = helpers.get_user_id_from_body(body)
     if not user_id or not _is_admin(client, user_id, body):
         return
-    _complete_data_migration_import(body, client, logger, context, user_id=user_id)
+    _complete_data_migration_import(
+        body,
+        client,
+        logger,
+        context,
+        user_id=user_id,
+        finish_here=_migration_finish_choice(body) == "finish",
+    )
 
 
 def handle_data_migration_proceed(
@@ -977,4 +1064,4 @@ def handle_data_migration_proceed(
     user_id = helpers.get_user_id_from_body(body)
     if not _is_admin(client, user_id, body):
         return
-    _complete_data_migration_import(body, client, logger, context, user_id=user_id)
+    _complete_data_migration_import(body, client, logger, context, user_id=user_id, finish_here=False)
