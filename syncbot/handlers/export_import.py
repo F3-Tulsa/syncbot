@@ -811,7 +811,7 @@ def _import_missing_workspace_text(names: list[str], *, finished: bool) -> str:
 _IMPORT_FINISH_HELP = (
     "How should this import finish?\n"
     "*Wait for the other install.* This Workspace's Syncs stay `Waiting for migration` "
-    "until an External Connection exists and the old instance uninstalls SyncBot.\n"
+    "until an External Connection that includes this Workspace exists and the old instance uninstalls SyncBot.\n"
     "*Finish on this install.* This Workspace is not still installed on another SyncBot, "
     "so the Syncs resume now."
 )
@@ -856,21 +856,17 @@ def _import_finished_text(data: dict, workspace, release: str, *, finish_here: b
             ":white_check_mark: Import finished. :warning: This install has no External Connection, "
             "so this Workspace stays `Waiting for migration`."
         )
-        if missing:
-            turn_on = ""
-            if not helpers.federation_enabled():
-                turn_on = "turns Federation on in Settings, then "
-            return (
-                f"{held} {_missing_channels_clause(missing)} "
-                f"A primary Workspace admin {turn_on}uses Create Connection, the other install uses Join, "
-                "then import this file again. The old instance uninstalls SyncBot before those Syncs resume."
-            )
-        return (
-            f"{held} A primary Workspace admin "
-            f"{'' if helpers.federation_enabled() else 'turns Federation on in Settings, then '}"
-            "uses Create Connection, the other install uses Join, "
-            "and the old instance uninstalls SyncBot before those Syncs resume."
+        turn_on = "" if helpers.federation_enabled() else "turns Federation on in Settings, then "
+        follow = (
+            f"A primary Workspace admin {turn_on}connects the two installs with Create Connection and Join, "
+            "and picks this Workspace for that connection."
         )
+        if missing:
+            return (
+                f"{held} {_missing_channels_clause(missing)} {follow} Then import this file again. "
+                "The Syncs resume after the old instance uninstalls SyncBot."
+            )
+        return f"{held} {follow} The Syncs resume after the old instance uninstalls SyncBot."
     if release == "waiting_for_uninstall":
         text = (
             ":white_check_mark: Import finished. :warning: The other install still has this Workspace, "

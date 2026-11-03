@@ -360,6 +360,7 @@ class TestDataMigrationImportConnect:
         assert "turns Federation on" not in text
         assert "Wait for the other install" in text
         assert "Finish on this install" in text
+        assert "includes this Workspace" in text
         radio = next(block["element"] for block in resp["view"]["blocks"] if block.get("type") == "input")
         assert radio["initial_option"]["value"] == "wait"
 
@@ -645,7 +646,10 @@ class TestDataMigrationImportConnect:
             patch("handlers.export_import.helpers.notify_user_dm") as dm,
         ):
             handle_data_migration_review(body, client, MagicMock(), {})
-        assert "turns Federation on in Settings, then uses Create Connection" in dm.call_args.args[2]
+        text = dm.call_args.args[2]
+        assert "turns Federation on in Settings, then connects" in text
+        assert "`Workspace B` is not on this install" in text
+        assert "Then import this file again." in text
 
     def test_finished_import_waits_when_there_is_no_connection(self):
         from types import SimpleNamespace
@@ -683,8 +687,9 @@ class TestDataMigrationImportConnect:
         assert release.call_args.kwargs["finish_here"] is False
         expected = (
             ":white_check_mark: Import finished. :warning: This install has no External Connection, "
-            "so this Workspace stays `Waiting for migration`. A primary Workspace admin uses Create Connection, "
-            "the other install uses Join, and the old instance uninstalls SyncBot before those Syncs resume."
+            "so this Workspace stays `Waiting for migration`. A primary Workspace admin connects the two installs "
+            "with Create Connection and Join, and picks this Workspace for that connection. "
+            "The Syncs resume after the old instance uninstalls SyncBot."
         )
         assert dm.call_args.args[2] == expected
         assert "are active" not in expected
