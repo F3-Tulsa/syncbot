@@ -728,6 +728,110 @@ def _run_migration_import(
     ei.invalidate_home_tab_caches_for_team(workspace_record.team_id)
 
 
+def _remember_migration_team(
+    names_by_team: dict[str, str],
+    team_id: str,
+    workspace_name: str | None,
+    this_team_id: str,
+) -> None:
+    tid = (team_id or "").strip()
+    if not tid or tid == this_team_id:
+        return
+    name = str(workspace_name or "").strip()
+    if tid not in names_by_team:
+        names_by_team[tid] = name or tid
+    elif name and names_by_team[tid] == tid:
+        names_by_team[tid] = name
+
+
+def _migration_workspace_names_not_here(data: dict, this_team_id: str) -> list[str]:
+    """Display names of Slack teams in the file that have no Workspace row here."""
+    names_by_team: dict[str, str] = {}
+    for group in data.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        for member in group.get("member_workspaces") or []:
+            if isinstance(member, dict):
+                _remember_migration_team(
+                    names_by_team,
+                    str(member.get("team_id") or ""),
+                    member.get("workspace_name"),
+                    this_team_id,
+                )
+        for team in group.get("member_team_ids") or []:
+            _remember_migration_team(names_by_team, str(team or ""), None, this_team_id)
+    for channel in data.get("sync_channels") or []:
+        if isinstance(channel, dict):
+            _remember_migration_team(names_by_team, str(channel.get("team_id") or ""), None, this_team_id)
+    missing = []
+    for team_id, name in names_by_team.items():
+        rows = DbManager.find_records(schemas.Workspace, [schemas.Workspace.team_id == team_id])
+        if not rows:
+            missing.append(name)
+    missing.sort(key=str.lower)
+    return missing
+
+
+def _format_workspace_names(names: list[str]) -> str:
+    ticked = [f"`{name}`" for name in names]
+    if len(ticked) == 1:
+        return ticked[0]
+    if len(ticked) == 2:
+        return f"{ticked[0]} and {ticked[1]}"
+    return ", ".join(ticked[:-1]) + f", and {ticked[-1]}"
+
+
+def _import_connect_instruction() -> str:
+    turn_on = ""
+    if not helpers.federation_enabled():
+        turn_on = "turns Federation on in Settings, then "
+    return (
+        f"A primary Workspace admin {turn_on}uses Create Connection, the other install uses Join, "
+        "and then this file is imported again."
+    )
+
+
+def _import_missing_workspace_text(names: list[str], *, finished: bool) -> str:
+    label = _format_workspace_names(names)
+    verb = "is" if len(names) == 1 else "are"
+    channels = "its Channels" if len(names) == 1 else "their Channels"
+    connect = _import_connect_instruction()
+    if finished:
+        return (
+            ":white_check_mark: Import finished. :warning: "
+            f"{label} {verb} not on this install, so {channels} were not imported. {connect}"
+        )
+    return (
+        f":warning: {label} {verb} not on this install. "
+        "Import keeps this Workspace's Groups and Syncs and leaves out "
+        f"{channels}. {connect}"
+    )
+
+
+def _workspace_is_waiting_for_migration(workspace_id: int) -> bool:
+    rows = DbManager.find_records(
+        schemas.SyncChannel,
+        [
+            schemas.SyncChannel.workspace_id == workspace_id,
+            schemas.SyncChannel.deleted_at.is_(None),
+            schemas.SyncChannel.status == "pending",
+        ],
+    )
+    return bool(rows)
+
+
+def _import_finished_text(data: dict, workspace) -> str:
+    missing = _migration_workspace_names_not_here(data, getattr(workspace, "team_id", "") or "")
+    if missing:
+        return _import_missing_workspace_text(missing, finished=True)
+    if _workspace_is_waiting_for_migration(workspace.id):
+        return (
+            ":white_check_mark: Import finished. This Workspace stays `Waiting for migration` "
+            "until the old instance uninstalls SyncBot."
+        )
+    return ":white_check_mark: Import finished."
+
+
 def handle_data_migration_submit_ack(
     body: dict,
     client: WebClient,
@@ -765,6 +869,9 @@ def handle_data_migration_submit_ack(
                 "Only Import if you intentionally edited it."
             )
         )
+    missing = _migration_workspace_names_not_here(data, workspace_record.team_id)
+    if missing:
+        blocks.append(section(_import_missing_workspace_text(missing, finished=False)))
     blocks.extend(_migration_overview_blocks(data))
     review = orm.BlockView(blocks=blocks)
     return {
@@ -778,7 +885,6 @@ def handle_data_migration_submit_ack(
     }
 
 
-_IMPORT_DONE_TEXT = ":white_check_mark: Import finished. Migration happens after the old instance is uninstalled."
 _IMPORT_FAIL_TEXT = ":warning: Import failed. Try the import again."
 _IMPORT_EXPIRED_TEXT = ":warning: That import expired. Try the import again."
 
@@ -845,7 +951,7 @@ def _complete_data_migration_import(
         log_error("data_migration_import_failed", user_id=user_id, exc_info=True)
         _notify_import_result(client, body, user_id, _IMPORT_FAIL_TEXT)
         return
-    _notify_import_result(client, body, user_id, _IMPORT_DONE_TEXT)
+    _notify_import_result(client, body, user_id, _import_finished_text(data, workspace_record))
 
 
 def handle_data_migration_review(

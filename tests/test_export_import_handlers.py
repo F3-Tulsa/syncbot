@@ -301,6 +301,64 @@ class TestDataMigrationImportConnect:
         assert "Synced Messages" in text
         assert "Announcements" in text
 
+    def test_review_names_a_workspace_that_is_not_here(self):
+        from types import SimpleNamespace
+
+        from handlers.export_import import handle_data_migration_submit_ack
+
+        payload = {
+            "version": 1,
+            "workspace": {"team_id": "T1", "workspace_name": "Workspace A"},
+            "groups": [
+                {
+                    "uid": "g1",
+                    "name": "Workspace Group",
+                    "member_workspaces": [
+                        {"team_id": "T1", "workspace_name": "Workspace A"},
+                        {"team_id": "T2", "workspace_name": "Workspace B"},
+                        {"team_id": "T3", "workspace_name": "Workspace C"},
+                    ],
+                }
+            ],
+        }
+        workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
+        body = {
+            "user": {"id": "U1"},
+            "team": {"id": "T1"},
+            "view": {
+                "state": {
+                    "values": {
+                        actions.CONFIG_DATA_MIGRATION_JSON_INPUT: {
+                            actions.CONFIG_DATA_MIGRATION_JSON_INPUT: {
+                                "files": [{"url_private_download": "https://files.example/m.json"}],
+                            }
+                        }
+                    }
+                }
+            },
+        }
+        with (
+            patch("handlers.export_import._is_admin", return_value=True),
+            patch("handlers.export_import._download_uploaded_file", return_value=(json.dumps(payload), None)),
+            patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
+            patch(
+                "handlers.export_import.DbManager.find_records",
+                side_effect=[[], [], [SimpleNamespace(team_id="T3")]],
+            ),
+            patch("handlers.export_import.ei.verify_migration_signature", return_value=True),
+            patch("handlers.export_import.helpers.federation_enabled", return_value=True),
+            patch("helpers._cache._cache_set"),
+        ):
+            resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+
+        text = str(resp["view"])
+        assert resp["view"]["submit"]["text"] == "Import"
+        assert "`Workspace B` is not on this install" in text
+        assert "Workspace C" not in text
+        assert "connection code" not in text
+        assert "Create Connection" in text
+        assert "turns Federation on" not in text
+
     def test_import_does_not_open_a_connection(self):
         from types import SimpleNamespace
 
@@ -375,14 +433,114 @@ class TestDataMigrationImportConnect:
             patch("helpers._cache._cache_get", return_value=meta),
             patch("handlers.export_import.helpers.get_workspace_by_id", return_value=workspace),
             patch("handlers.export_import._run_migration_import") as run_import,
+            patch("handlers.export_import._workspace_is_waiting_for_migration", return_value=False),
             patch("handlers.export_import.builders.refresh_home_tab_for_workspace"),
             patch("handlers.export_import.helpers.notify_user_dm") as dm,
         ):
             handle_data_migration_review(body, client, MagicMock(), {})
         run_import.assert_called_once()
         dm.assert_called_once()
-        assert "Import finished" in dm.call_args.args[2]
-        client.views_update.assert_called_once()
+        assert dm.call_args.args[2] == ":white_check_mark: Import finished."
+        assert "uninstall" not in dm.call_args.args[2]
+        view = client.views_update.call_args.kwargs["view"]
+        assert view["blocks"][0]["text"]["text"] == dm.call_args.args[2]
+
+    def test_finished_import_names_a_missing_workspace(self):
+        from types import SimpleNamespace
+
+        from handlers.export_import import handle_data_migration_review
+
+        workspace = SimpleNamespace(id=1, team_id="T1")
+        body = {"user": {"id": "U1"}, "view": {"id": "V1"}}
+        client = MagicMock()
+        meta = {
+            "data": {
+                "version": 1,
+                "groups": [
+                    {
+                        "uid": "g1",
+                        "name": "Workspace Group",
+                        "member_workspaces": [{"team_id": "T2", "workspace_name": "Workspace B"}],
+                    }
+                ],
+            },
+            "group_id": 7,
+            "workspace_id": 1,
+            "team_id_to_workspace_id": {},
+        }
+        with (
+            patch("handlers.export_import._is_admin", return_value=True),
+            patch("helpers._cache._cache_get", return_value=meta),
+            patch("handlers.export_import.helpers.get_workspace_by_id", return_value=workspace),
+            patch("handlers.export_import.helpers.federation_enabled", return_value=True),
+            patch("handlers.export_import.DbManager.find_records", return_value=[]),
+            patch("handlers.export_import._run_migration_import"),
+            patch("handlers.export_import.builders.refresh_home_tab_for_workspace"),
+            patch("handlers.export_import.helpers.notify_user_dm") as dm,
+        ):
+            handle_data_migration_review(body, client, MagicMock(), {})
+        expected = (
+            ":white_check_mark: Import finished. :warning: `Workspace B` is not on this install, "
+            "so its Channels were not imported. A primary Workspace admin uses Create Connection, "
+            "the other install uses Join, and then this file is imported again."
+        )
+        assert dm.call_args.args[2] == expected
+        assert "uninstall" not in expected
+        view = client.views_update.call_args.kwargs["view"]
+        assert view["blocks"][0]["text"]["text"] == expected
+
+    def test_finished_import_says_when_this_workspace_is_waiting(self):
+        from types import SimpleNamespace
+
+        from handlers.export_import import handle_data_migration_review
+
+        workspace = SimpleNamespace(id=1, team_id="T1")
+        body = {"user": {"id": "U1"}, "view": {"id": "V1"}}
+        client = MagicMock()
+        meta = {"data": {"version": 1}, "group_id": 7, "workspace_id": 1, "team_id_to_workspace_id": {}}
+        with (
+            patch("handlers.export_import._is_admin", return_value=True),
+            patch("helpers._cache._cache_get", return_value=meta),
+            patch("handlers.export_import.helpers.get_workspace_by_id", return_value=workspace),
+            patch("handlers.export_import.DbManager.find_records", return_value=[SimpleNamespace(status="pending")]),
+            patch("handlers.export_import._run_migration_import"),
+            patch("handlers.export_import.builders.refresh_home_tab_for_workspace"),
+            patch("handlers.export_import.helpers.notify_user_dm") as dm,
+        ):
+            handle_data_migration_review(body, client, MagicMock(), {})
+        assert dm.call_args.args[2] == (
+            ":white_check_mark: Import finished. This Workspace stays `Waiting for migration` "
+            "until the old instance uninstalls SyncBot."
+        )
+
+    def test_finished_import_says_to_turn_federation_on(self):
+        from types import SimpleNamespace
+
+        from handlers.export_import import handle_data_migration_review
+
+        workspace = SimpleNamespace(id=1, team_id="T1")
+        body = {"user": {"id": "U1"}, "view": {"id": "V1"}}
+        client = MagicMock()
+        meta = {
+            "data": {
+                "groups": [{"member_workspaces": [{"team_id": "T2", "workspace_name": "Workspace B"}]}],
+            },
+            "group_id": 7,
+            "workspace_id": 1,
+            "team_id_to_workspace_id": {},
+        }
+        with (
+            patch("handlers.export_import._is_admin", return_value=True),
+            patch("helpers._cache._cache_get", return_value=meta),
+            patch("handlers.export_import.helpers.get_workspace_by_id", return_value=workspace),
+            patch("handlers.export_import.helpers.federation_enabled", return_value=False),
+            patch("handlers.export_import.DbManager.find_records", return_value=[]),
+            patch("handlers.export_import._run_migration_import"),
+            patch("handlers.export_import.builders.refresh_home_tab_for_workspace"),
+            patch("handlers.export_import.helpers.notify_user_dm") as dm,
+        ):
+            handle_data_migration_review(body, client, MagicMock(), {})
+        assert "turns Federation on in Settings, then uses Create Connection" in dm.call_args.args[2]
 
     def test_review_import_dms_when_expired(self):
         from handlers.export_import import handle_data_migration_review
