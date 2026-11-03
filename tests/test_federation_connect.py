@@ -361,9 +361,11 @@ class TestEndpointAndSubpaths:
             patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
             patch.object(federation_core, "get_instance_id", return_value="fp"),
             patch.object(federation_core, "peer_session", return_value=session),
+            patch.object(federation_core, "_webhook_url_refusal", return_value=None),
         ):
             federation_core._federation_request(fed_ws, "/message", {"a": 1})
         assert session.request.call_args.args[1] == "https://peer.example/api/federation/message"
+        assert session.request.call_args.kwargs["allow_redirects"] is False
 
     def test_initiate_appends_pair_and_sends_endpoint(self):
         _private, public_pem = _keypair()
@@ -379,8 +381,79 @@ class TestEndpointAndSubpaths:
         ):
             federation_core.initiate_federation_connect("https://peer.example/api/federation", "FED-1")
         assert post.call_args.args[0] == "https://peer.example/api/federation/pair"
+        assert post.call_args.kwargs["allow_redirects"] is False
         sent = json.loads(post.call_args.kwargs["data"])
         assert sent["webhook_url"] == "https://this-instance.example/api/federation"
+
+
+class TestWebhookHostCheck:
+    def test_private_and_mapped_addresses_are_refused(self, monkeypatch):
+        import socket
+
+        refused = (
+            "127.0.0.1",
+            "0.0.0.0",
+            "100.64.0.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "::ffff:127.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            "2002:7f00:1::",
+            "fec0::1",
+        )
+
+        def fake_lookup(_host, _port):
+            return [(None, None, None, None, (fake_lookup.ip, 0))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", fake_lookup)
+        for ip in refused:
+            fake_lookup.ip = ip
+            assert federation_core.validate_webhook_url("https://peer.example/api/federation") is False
+
+    def test_userinfo_is_refused(self):
+        assert federation_core.validate_webhook_url("https://user@peer.example/api/federation") is False
+
+    def test_lookup_failure_retries_before_the_send(self):
+        fed_ws = SimpleNamespace(webhook_url="https://peer.example/api/federation", instance_id="fp")
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"ok": True}
+        session = MagicMock()
+        session.request.return_value = resp
+        with (
+            patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
+            patch.object(federation_core, "get_instance_id", return_value="self"),
+            patch.object(federation_core, "peer_session", return_value=session),
+            patch.object(federation_core, "_webhook_url_refusal", side_effect=["lookup_failed", None]),
+            patch.object(federation_core.time, "sleep"),
+        ):
+            result = federation_core._federation_request(fed_ws, "/message", {"a": 1})
+        assert result["ok"] is True
+        session.request.assert_called_once()
+
+    def test_refused_host_sends_nothing(self):
+        fed_ws = SimpleNamespace(webhook_url="https://peer.example/api/federation", instance_id="fp")
+        session = MagicMock()
+        with (
+            patch.object(federation_core, "peer_session", return_value=session),
+            patch.object(federation_core, "_webhook_url_refusal", return_value="refused"),
+        ):
+            assert federation_core._federation_request(fed_ws, "/message", {"a": 1}) is None
+        session.request.assert_not_called()
+
+    def test_redirect_is_not_followed(self):
+        fed_ws = SimpleNamespace(webhook_url="https://peer.example/api/federation", instance_id="fp")
+        resp = MagicMock(status_code=302)
+        resp.json.return_value = {}
+        session = MagicMock()
+        session.request.return_value = resp
+        with (
+            patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
+            patch.object(federation_core, "get_instance_id", return_value="self"),
+            patch.object(federation_core, "peer_session", return_value=session),
+            patch.object(federation_core, "_webhook_url_refusal", return_value=None),
+        ):
+            assert federation_core._federation_request(fed_ws, "/message", {"a": 1}) is None
+        assert session.request.call_args.kwargs["allow_redirects"] is False
 
 
 class TestEmptyUrlDm:

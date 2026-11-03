@@ -297,10 +297,90 @@ _PRIVATE_NETWORKS = [
     ipaddress.ip_network("192.168.0.0/16"),
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("224.0.0.0/4"),
     ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("::ffff:0:0/96"),
     ipaddress.ip_network("fc00::/7"),
     ipaddress.ip_network("fe80::/10"),
+    ipaddress.ip_network("fec0::/10"),
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("2002::/16"),
+    ipaddress.ip_network("2001::/32"),
+    ipaddress.ip_network("ff00::/8"),
 ]
+
+
+def _embedded_ipv4(
+    addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Unwrap mapped, 6to4, Teredo, and NAT64 addresses to the IPv4 they carry."""
+    if not isinstance(addr, ipaddress.IPv6Address):
+        return addr
+    if addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    raw = addr.packed
+    if addr in ipaddress.ip_network("2002::/16"):
+        return ipaddress.IPv4Address(raw[2:6])
+    if addr in ipaddress.ip_network("2001::/32"):
+        return ipaddress.IPv4Address(bytes(byte ^ 0xFF for byte in raw[12:16]))
+    if addr in ipaddress.ip_network("64:ff9b::/96"):
+        return ipaddress.IPv4Address(raw[12:16])
+    return addr
+
+
+def _address_is_public(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    addr = _embedded_ipv4(addr)
+    if addr.is_multicast or addr.is_reserved or addr.is_unspecified or not addr.is_global:
+        return False
+    return not any(addr in net for net in _PRIVATE_NETWORKS)
+
+
+def _webhook_url_refusal(url: str) -> str | None:
+    """Return ``None`` when *url* may be connected to, else ``refused`` or ``lookup_failed``."""
+    if not url or "\\" in url or any(ord(char) < 33 for char in url):
+        return "refused"
+    try:
+        from urllib3.util import parse_url
+
+        parsed = parse_url(url)
+        standard = urlparse(url)
+    except Exception:
+        return "refused"
+    if parsed.auth or standard.username or standard.password:
+        return "refused"
+    host = parsed.host
+    standard_host = standard.hostname
+    if not host or not standard_host or host.lower() != standard_host.lower():
+        return "refused"
+    scheme = (parsed.scheme or "").lower()
+    if constants.LOCAL_DEVELOPMENT:
+        if scheme not in ("http", "https"):
+            return "refused"
+    elif scheme != "https":
+        return "refused"
+
+    import socket
+
+    try:
+        addresses = socket.getaddrinfo(standard_host, None)
+    except socket.gaierror:
+        log_warning("federation_ssrf_blocked", hostname=standard_host, reason="lookup_failed")
+        return "lookup_failed"
+    except Exception:
+        return "refused"
+    for info in addresses:
+        try:
+            addr = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            log_warning("federation_ssrf_blocked", hostname=standard_host)
+            return "refused"
+        if not _address_is_public(addr):
+            log_warning("federation_ssrf_blocked", hostname=standard_host, resolved_ip=str(addr))
+            return "refused"
+    return None
 
 
 def validate_webhook_url(url: str) -> bool:
@@ -309,39 +389,7 @@ def validate_webhook_url(url: str) -> bool:
     Rejects private/loopback IPs (SSRF protection) and requires HTTPS in
     production.  HTTP is allowed only when ``LOCAL_DEVELOPMENT`` is true.
     """
-    if not url:
-        return False
-
-    try:
-        parsed = urlparse(url)
-    except Exception:
-        return False
-
-    if constants.LOCAL_DEVELOPMENT:
-        if parsed.scheme not in ("http", "https"):
-            return False
-    else:
-        if parsed.scheme != "https":
-            return False
-
-    hostname = parsed.hostname
-    if not hostname:
-        return False
-
-    import socket
-
-    try:
-        addr_infos = socket.getaddrinfo(hostname, None)
-        for info in addr_infos:
-            addr = ipaddress.ip_address(info[4][0])
-            for net in _PRIVATE_NETWORKS:
-                if addr in net:
-                    log_warning("federation_ssrf_blocked", url=url, resolved_ip=str(addr))
-                    return False
-    except (socket.gaierror, ValueError):
-        return False
-
-    return True
+    return _webhook_url_refusal(url) is None
 
 
 # ---------------------------------------------------------------------------
@@ -648,6 +696,19 @@ def _federation_request(
     start_time = time.time()
 
     for attempt in range(attempts):
+        refusal = _webhook_url_refusal(fed_ws.webhook_url or "")
+        if refusal == "lookup_failed":
+            log_warning(
+                "federation_request_retry",
+                attempt=attempt + 1,
+                remote=fed_ws.instance_id,
+                reason="lookup_failed",
+            )
+            if attempt < attempts - 1:
+                time.sleep(_RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)])
+            continue
+        if refusal:
+            return None
         try:
             sig, ts = federation_sign(body)
             headers = {
@@ -658,7 +719,12 @@ def _federation_request(
                 "X-Federation-Instance": get_instance_id(),
             }
             resp = peer_session(fed_ws.instance_id).request(
-                method, url, data=body, headers=headers, timeout=req_timeout
+                method,
+                url,
+                data=body,
+                headers=headers,
+                timeout=req_timeout,
+                allow_redirects=False,
             )
             elapsed = round((time.time() - start_time) * 1000, 1)
 
@@ -674,6 +740,14 @@ def _federation_request(
                 if isinstance(data, dict):
                     data["_http_status"] = resp.status_code
                 return data
+            elif 300 <= resp.status_code < 400:
+                log_warning(
+                    "federation_request_failed",
+                    status=resp.status_code,
+                    remote=fed_ws.instance_id,
+                    reason="redirect",
+                )
+                return None
             elif resp.status_code >= 500:
                 log_warning(
                     "federation_request_retry",
@@ -757,6 +831,8 @@ def push_file_part(
 
     if is_self_instance(fed_ws):
         return None
+    if not validate_webhook_url(fed_ws.webhook_url or ""):
+        return None
     url = (fed_ws.webhook_url or "").rstrip("/") + "/file"
     chunk_sha = _hashlib.sha256(payload).hexdigest()
     sign_body_str = f"POST:/api/federation/file:{sha256}:{part_index}:{total}:{chunk_sha}"
@@ -774,7 +850,13 @@ def push_file_part(
             "X-Federation-File-Total": str(total),
             "X-Federation-File-Size": str(int(size)),
         }
-        resp = requests.post(url, data=payload, headers=headers, timeout=_FILE_PART_TIMEOUT)
+        resp = requests.post(
+            url,
+            data=payload,
+            headers=headers,
+            timeout=_FILE_PART_TIMEOUT,
+            allow_redirects=False,
+        )
         try:
             data = resp.json()
         except Exception:
@@ -1175,6 +1257,7 @@ def initiate_federation_connect(
                     "X-Federation-Instance": get_instance_id(),
                 },
                 timeout=_REQUEST_TIMEOUT,
+                allow_redirects=False,
             )
             if resp.status_code == 200:
                 log_info(
