@@ -536,6 +536,22 @@ def respond_to_message_event(
     event_files = helpers.safe_get(body, "event", "files") or helpers.safe_get(body, "event", "message", "files") or []
     if not isinstance(event_files, list):
         event_files = []
+    raw_outside = [item for item in event_files if isinstance(item, dict) and helpers.is_outside_file(item)]
+    outside_files: list = []
+    if raw_outside:
+        raw_event = body.get("event") if isinstance(body.get("event"), dict) else {}
+        kept_event = raw_event
+        if raw_event.get("subtype") == "message_changed" and isinstance(raw_event.get("message"), dict):
+            kept_event = raw_event["message"]
+        if helpers.event_keeps_hosted_files(
+            kept_event,
+            is_reply=bool(ctx.get("thread_ts")),
+            text=ctx.get("msg_text") or "",
+        ):
+            outside_files = raw_outside
+    if raw_outside:
+        body = helpers.drop_outside_files(body)
+        event_files = [item for item in event_files if not (isinstance(item, dict) and helpers.is_outside_file(item))]
     _SYNCED_SUBTYPES = frozenset(
         {
             None,
@@ -695,6 +711,12 @@ def respond_to_message_event(
         if has_targets:
             _enrich_event_fields_for_sync(file_body, client, ctx)
             photo_blocks, direct_files = _build_file_context(file_body, client, logger)
+            if outside_files:
+                ctx["msg_text"], ctx["content_blocks"] = helpers.add_outside_file_links(
+                    ctx.get("msg_text"),
+                    ctx.get("content_blocks"),
+                    outside_files,
+                )
         else:
             # Origin PostMeta still needed for later join/thread/reaction; skip Slack.
             photo_blocks, direct_files = [], []

@@ -62,13 +62,17 @@ from helpers.envelope import (
     get_post_id_for_post_records,
 )
 from helpers.files import (
+    add_outside_file_links,
     cleanup_temp_files,
     download_slack_files,
+    drop_outside_files,
     event_has_downloadable_hosted_file,
     event_is_new_file_share,
     event_keeps_hosted_files,
     file_ids_from_message_event,
     hosted_file_fetch_url,
+    is_outside_file,
+    is_slack_file_url,
     upload_files_to_slack,
 )
 from helpers.group_roles import (
@@ -276,6 +280,8 @@ __all__ = [
     "cleanup_temp_files",
     "decrypt_bot_token",
     "delete_message",
+    "add_outside_file_links",
+    "drop_outside_files",
     "download_slack_files",
     "event_has_downloadable_hosted_file",
     "event_has_slack_hosted_media_blocks",
@@ -283,6 +289,8 @@ __all__ = [
     "event_keeps_hosted_files",
     "file_ids_from_message_event",
     "hosted_file_fetch_url",
+    "is_outside_file",
+    "is_slack_file_url",
     "is_slack_hosted_media_url",
     "encrypt_bot_token",
     "ACTION_ADD",

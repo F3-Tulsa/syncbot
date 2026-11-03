@@ -41,11 +41,19 @@ def _download_uploaded_file(file_url: str, token: str) -> tuple[str | None, str 
     import urllib.error
     import urllib.request
 
-    from helpers.files import max_file_bytes
+    from helpers.files import is_slack_file_url, max_file_bytes
 
+    if not is_slack_file_url(file_url):
+        return None, "Failed to download the uploaded file."
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect)
     req = urllib.request.Request(file_url, headers={"Authorization": f"Bearer {token}"})
     try:
-        with urllib.request.urlopen(req, timeout=_UPLOAD_DOWNLOAD_TIMEOUT) as resp:
+        with opener.open(req, timeout=_UPLOAD_DOWNLOAD_TIMEOUT) as resp:
             chunks: list[bytes] = []
             total = 0
             limit = max_file_bytes()
@@ -59,13 +67,13 @@ def _download_uploaded_file(file_url: str, token: str) -> tuple[str | None, str 
                 chunks.append(chunk)
             raw = b"".join(chunks)
     except urllib.error.HTTPError as e:
-        log_error("upload_download_http_error", error=str(e), exc_info=True)
+        log_error("upload_download_http_error", error_type=type(e).__name__, exc_info=True)
         return None, "Failed to download the uploaded file."
     except TimeoutError as e:
-        log_error("upload_download_timeout", error=str(e), exc_info=True)
+        log_error("upload_download_timeout", error_type=type(e).__name__, exc_info=True)
         return None, "Failed to download the uploaded file."
     except OSError as e:
-        log_error("upload_download_failed", error=str(e), exc_info=True)
+        log_error("upload_download_failed", error_type=type(e).__name__, exc_info=True)
         return None, "Failed to download the uploaded file."
     try:
         return raw.decode("utf-8"), None
