@@ -57,7 +57,6 @@ from helpers import (
     get_request_type,
     get_team_id_from_body,
 )
-from helpers.oauth import capture_public_base_from_lambda_event
 from logger import (
     configure_logging,
     emit_metric,
@@ -215,7 +214,6 @@ def handler(event: dict, context: dict) -> dict:
         }
 
     path = event.get("path", "") or event.get("rawPath", "")
-    capture_public_base_from_lambda_event(event)
     if path.startswith(FEDERATION_API_BASE_PATH):
         if not federation_enabled():
             return {
@@ -234,8 +232,6 @@ def handler(event: dict, context: dict) -> dict:
             "headers": {"Content-Type": "text/plain;charset=utf-8"},
             "body": "Not Found",
         }
-
-    capture_public_base(event.get("headers") or {})
 
     if SlackRequestHandler is None:
         raise RuntimeError(
@@ -577,7 +573,6 @@ def run_syncbot_http_server(
                         query=query,
                         headers=self.headers,
                     )
-                    capture_public_base(self.headers)
                     bolt_resp = _bolt_oauth_flow.handle_installation(bolt_req)
                     self._send_bolt_response(bolt_resp)
                     return
@@ -587,7 +582,6 @@ def run_syncbot_http_server(
                         query=query,
                         headers=self.headers,
                     )
-                    capture_public_base(self.headers)
                     bolt_resp = _bolt_oauth_flow.handle_callback(bolt_req)
                     self._send_bolt_response(bolt_resp)
                     return

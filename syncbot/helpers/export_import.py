@@ -262,6 +262,8 @@ def restore_full_backup(
                 row = {**row, "mapped_at": row["matched_at"]}
             if table_name == "workspace_settings" and row.get("key") == "last_auto_match":
                 row = {**row, "key": "last_auto_map"}
+            if table_name == "instance_settings" and row.get("key") == constants.SETTING_PUBLIC_BASE_URL:
+                continue
             kwargs = {}
             for k, v in row.items():
                 if k not in known_columns:

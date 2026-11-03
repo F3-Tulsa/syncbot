@@ -342,9 +342,9 @@ class TestAuthorizeUrl:
     def test_remembered_host_is_used_without_context(self, monkeypatch):
         monkeypatch.setenv("SLACK_CLIENT_ID", "111.222")
         monkeypatch.setenv("SYNCBOT_PUBLIC_URL", "")
-        from helpers.oauth import remember_public_base
+        from helpers.oauth import capture_public_base
 
-        remember_public_base("https://fn.lambda-url.us-east-1.on.aws")
+        capture_public_base({"host": "fn.lambda-url.us-east-1.on.aws", "x-forwarded-proto": "https"})
 
         assert authorize_url("T1") == "https://fn.lambda-url.us-east-1.on.aws/slack/install?team=T1"
 

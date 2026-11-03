@@ -133,6 +133,12 @@ class TestPublicBaseFromHeaders:
 
         assert public_base_from_headers({"x-forwarded-proto": "https"}) is None
 
+    def test_host_with_space_or_slash_is_rejected(self):
+        from helpers.oauth import public_base_from_headers
+
+        assert public_base_from_headers({"host": "fn.example/extra"}) is None
+        assert public_base_from_headers({"host": "fn example"}) is None
+
     def test_capture_sets_context_and_remembered_host(self):
         from helpers.oauth import capture_public_base, get_public_base_url
 
@@ -154,18 +160,19 @@ class TestGetPublicBaseUrl:
         )
 
     def test_remembered_host_when_context_empty(self):
+        import helpers.oauth as oauth_mod
         from helpers.oauth import get_public_base_url, remember_public_base
 
+        oauth_mod._verified_public_base = False
         remember_public_base("https://cached.example")
-        assert get_public_base_url({}) == "https://cached.example"
+        assert get_public_base_url({}) is None
 
     def test_legacy_env_is_ignored_and_warned_once(self, monkeypatch, caplog):
         import helpers.oauth as oauth_mod
 
         monkeypatch.setenv("SYNCBOT_PUBLIC_URL", "https://legacy.example")
         oauth_mod._LEGACY_PUBLIC_URL_WARNED = False
-        remember = oauth_mod.remember_public_base
-        remember("https://from-host.example")
+        oauth_mod.capture_public_base({"host": "from-host.example", "x-forwarded-proto": "https"})
 
         with caplog.at_level("WARNING", logger="syncbot"):
             assert oauth_mod.get_public_base_url() == "https://from-host.example"
@@ -179,13 +186,15 @@ class TestGetPublicBaseUrl:
         assert len(warnings) == 1
 
     def test_falls_back_to_persisted_instance_setting(self):
+        import helpers.oauth as oauth_mod
         from helpers.oauth import get_public_base_url
 
+        oauth_mod._verified_public_base = False
         with (
             patch("helpers.oauth._cache_get", return_value=None),
             patch("helpers.oauth._load_persisted_public_base", return_value="https://from-db.example"),
         ):
-            assert get_public_base_url() == "https://from-db.example"
+            assert get_public_base_url() is None
 
     def test_lambda_event_uses_request_context_domain(self):
         from helpers.oauth import public_base_from_lambda_event
@@ -303,10 +312,10 @@ class TestOauthSuccessCallback:
 class TestFederationGetPublicUrl:
     def test_uses_remembered_host_and_ignores_legacy_env(self, monkeypatch):
         from federation.core import get_public_url
-        from helpers.oauth import remember_public_base
+        from helpers.oauth import capture_public_base
 
         monkeypatch.setenv("SYNCBOT_PUBLIC_URL", "https://legacy.example")
-        remember_public_base("https://from-host.example")
+        capture_public_base({"host": "from-host.example", "x-forwarded-proto": "https"})
 
         assert get_public_url() == "https://from-host.example"
 

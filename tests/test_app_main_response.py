@@ -251,9 +251,11 @@ class TestLambdaHandler:
                 },
                 {},
             )
+        import helpers.oauth as oauth_mod
         from helpers.oauth import get_public_base_url
 
-        assert get_public_base_url() == "https://fn.lambda-url.us-east-1.on.aws"
+        oauth_mod._verified_public_base = False
+        assert get_public_base_url() is None
 
     def test_federation_path_is_404_when_settings_off(self):
         with (
