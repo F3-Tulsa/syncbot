@@ -602,8 +602,8 @@ class TestFedWsCacheInvalidation:
             patch.object(federation_api.federation, "get_or_create_instance", return_value=fed_ws),
             patch.object(federation_api.federation, "get_or_create_instance_keypair", return_value=(None, "our-pem")),
             patch.object(federation_api.federation, "get_instance_id", return_value="b" * 64),
-            patch.object(federation_api.federation, "push_allowed_workspaces", return_value={"ok": True}),
-            patch("federation.replicate.replicate_peer_snapshot"),
+            patch.object(federation_api.federation, "push_allowed_workspaces", return_value={"ok": True}) as push,
+            patch("federation.replicate.replicate_peer_snapshot") as snapshot,
             patch.object(
                 federation_api.DbManager,
                 "find_records",
@@ -627,6 +627,97 @@ class TestFedWsCacheInvalidation:
         assert status == 200
         assert resp.get("ok") is True
         inv.assert_called_once_with()
+        push.assert_not_called()
+        snapshot.assert_not_called()
+
+    def _pair_request(self, body: dict):
+        from federation import api as federation_api
+
+        return federation_api.handle_pair(
+            body,
+            json.dumps(body),
+            {
+                "X-Federation-Signature": "sig",
+                "X-Federation-Timestamp": "1",
+                "X-Federation-Instance": body["instance_id"],
+            },
+        )
+
+    def test_pair_retry_after_the_code_is_used_returns_ok(self):
+        from federation import api as federation_api
+
+        body = {
+            "code": "FED-ABCD1234",
+            "webhook_url": "https://peer.example/api/federation",
+            "instance_id": "a" * 64,
+            "public_key": "pem",
+        }
+        saved = SimpleNamespace(
+            instance_id=body["instance_id"],
+            public_key="pem",
+            status="active",
+            trust_status="trusted",
+        )
+        with (
+            patch.object(federation_api.federation, "federation_verify", return_value=True),
+            patch.object(federation_api.federation, "instance_id_matches_public_key", return_value=True),
+            patch.object(federation_api.federation, "get_instance_id", return_value="b" * 64),
+            patch.object(federation_api.federation, "get_or_create_instance_keypair", return_value=(None, "our-pem")),
+            patch.object(federation_api.federation, "get_or_create_instance") as create,
+            patch.object(federation_api.DbManager, "find_records", side_effect=[[], [saved]]),
+            patch.object(federation_api.DbManager, "update_records") as update,
+        ):
+            status, resp = self._pair_request(body)
+        assert status == 200
+        assert resp["ok"] is True
+        assert resp["public_key"] == "our-pem"
+        create.assert_not_called()
+        update.assert_not_called()
+        assert saved.trust_status == "trusted"
+
+    def test_unknown_code_without_a_saved_peer_stays_unknown(self):
+        from federation import api as federation_api
+
+        body = {
+            "code": "FED-ABCD1234",
+            "webhook_url": "https://peer.example/api/federation",
+            "instance_id": "a" * 64,
+            "public_key": "pem",
+        }
+        with (
+            patch.object(federation_api.federation, "federation_verify", return_value=True),
+            patch.object(federation_api.federation, "instance_id_matches_public_key", return_value=True),
+            patch.object(federation_api.federation, "get_instance_id", return_value="b" * 64),
+            patch.object(federation_api.DbManager, "find_records", side_effect=[[], []]),
+        ):
+            status, resp = self._pair_request(body)
+        assert status == 404
+        assert resp == {"message": "Not Found"}
+
+    def test_used_code_with_a_different_public_key_stays_unknown(self):
+        from federation import api as federation_api
+
+        body = {
+            "code": "FED-ABCD1234",
+            "webhook_url": "https://peer.example/api/federation",
+            "instance_id": "a" * 64,
+            "public_key": "pem",
+        }
+        saved = SimpleNamespace(
+            instance_id=body["instance_id"],
+            public_key="other-pem",
+            status="active",
+            trust_status="trusted",
+        )
+        with (
+            patch.object(federation_api.federation, "federation_verify", return_value=True),
+            patch.object(federation_api.federation, "instance_id_matches_public_key", return_value=True),
+            patch.object(federation_api.federation, "get_instance_id", return_value="b" * 64),
+            patch.object(federation_api.DbManager, "find_records", side_effect=[[], [saved]]),
+        ):
+            status, resp = self._pair_request(body)
+        assert status == 404
+        assert resp == {"message": "Not Found"}
 
     def test_inbound_pair_rejects_connection_blob_as_code(self):
         from federation import api as federation_api
