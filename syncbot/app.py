@@ -415,14 +415,15 @@ def main_response(body: dict, logger, client, ack, context: dict) -> None:
             open_loading_modal(body, client)
 
     if request_type == "view_submission":
+        ack_handler = VIEW_ACK_MAPPER.get(request_id)
+        result = ack_handler(body, client, context) if ack_handler else None
+        if isinstance(result, dict) and result.get("response_action") == "errors":
+            if LOCAL_DEVELOPMENT:
+                ack(**result)
+            return
         if LOCAL_DEVELOPMENT:
-            ack_handler = VIEW_ACK_MAPPER.get(request_id)
-            if ack_handler:
-                result = ack_handler(body, client, context)
-                if isinstance(result, dict):
-                    ack(**result)
-                else:
-                    ack()
+            if isinstance(result, dict):
+                ack(**result)
             else:
                 ack()
         # Production: ack already sent by view_ack
