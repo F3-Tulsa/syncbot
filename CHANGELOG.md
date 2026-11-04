@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- version list -->
 
+## [Unreleased]
+
+### Fixed
+
+- An image that an app shows from a Slack file is copied with the message, on this instance and across External Connections
+- When Slack refuses a copy's blocks, the copy is posted as text instead of being lost
+- Table blocks are copied, and a video from another site is copied as a link
 
 ## [1.7.4] - 2026-11-04
 

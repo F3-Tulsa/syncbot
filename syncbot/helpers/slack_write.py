@@ -28,6 +28,7 @@ from logger import log_debug, log_error, log_info, log_warning
 
 _NO_AUTHORIZE_ERRORS = frozenset({"invalid_auth", "not_authed", "token_revoked", "missing_scope", "account_inactive"})
 _USER_WRITE_ERRORS = _NO_AUTHORIZE_ERRORS | frozenset({"not_in_channel", "channel_not_found"})
+_BLOCK_ERRORS = frozenset({"invalid_blocks", "invalid_blocks_format", "msg_blocks_too_long"})
 
 
 def _bot_token_for(workspace) -> str:
@@ -370,11 +371,18 @@ def slack_write_create(
         "source_workspace_id": envelope.get("source_workspace_id") or None,
     }
 
-    def _write(token: str, customize: bool, as_user: str | None) -> tuple[str | None, str | None]:
+    def _write(
+        token: str,
+        customize: bool,
+        as_user: str | None,
+        *,
+        blocks: list[dict] | None = None,
+    ) -> tuple[str | None, str | None]:
+        use_blocks = target_blocks if blocks is None else blocks
         # The file share is the message. Blocks and a comment together drop the blocks.
         # Bot customize sets the from line on every share, including file-only.
         if file_refs:
-            share_blocks = _blocks_for_file_share(adapted_text, target_blocks) if target_blocks else None
+            share_blocks = _blocks_for_file_share(adapted_text, use_blocks) if use_blocks else None
             file_ts = _upload_target_files(
                 token=token,
                 channel_id=sync_channel.channel_id,
@@ -391,13 +399,13 @@ def slack_write_create(
                 **pending_apply,
             )
             return file_ts, as_user
-        if not (adapted_text or "").strip() and not target_blocks:
+        if not (adapted_text or "").strip() and not use_blocks:
             raise RuntimeError("empty_message_create")
         return _post_target_text(
             token=token,
             channel_id=sync_channel.channel_id,
             adapted_text=adapted_text,
-            target_blocks=target_blocks,
+            target_blocks=use_blocks,
             thread_ts=thread_ts,
             reply_broadcast=reply_broadcast,
             customize=customize,
@@ -424,6 +432,19 @@ def slack_write_create(
         return _write(write_token, use_customize, posted_as)
     except SlackApiError as exc:
         code = slack_error_code(exc)
+        # Slack refuses the whole message for one block it will not take.
+        # Post the text, which already carries the blocks' words.
+        if code in _BLOCK_ERRORS and target_blocks:
+            log_warning(
+                "slack_write_blocks_refused",
+                channel_id=sync_channel.channel_id,
+                error=code,
+                block_types=sorted({b.get("type") for b in target_blocks if isinstance(b, dict) and b.get("type")}),
+            )
+            try:
+                return _write(write_token, use_customize, posted_as, blocks=[])
+            except Exception as retry_exc:
+                return _fail_create(retry_exc)
         if posted_as and code in _USER_WRITE_ERRORS:
             log_info("slack_write_user_fallback_bot", channel_id=sync_channel.channel_id, error=code)
             try:
@@ -500,13 +521,14 @@ def slack_write_edit(
     elif images:
         target_blocks = list(images)
 
-    def _update(write_token: str, as_user: str | None) -> bool:
+    def _update(write_token: str, as_user: str | None, *, blocks: list[dict] | None = None) -> bool:
+        use_blocks = target_blocks if blocks is None else blocks
         post_message(
             bot_token=write_token,
             channel_id=sync_channel.channel_id,
             msg_text=adapted_text,
             update_ts=update_ts,
-            blocks=target_blocks or None,
+            blocks=use_blocks or None,
         )
         if as_user:
             remember_message_echo(workspace.team_id, as_user, sync_channel.channel_id, update_ts)
@@ -516,6 +538,22 @@ def slack_write_edit(
         return _update(token, posted_as if used_user_token else None)
     except SlackApiError as exc:
         code = slack_error_code(exc)
+        if code in _BLOCK_ERRORS and target_blocks:
+            log_warning(
+                "slack_write_blocks_refused",
+                channel_id=sync_channel.channel_id,
+                error=code,
+                block_types=sorted({b.get("type") for b in target_blocks if isinstance(b, dict) and b.get("type")}),
+            )
+            try:
+                return _update(token, posted_as if used_user_token else None, blocks=[])
+            except Exception as retry_exc:
+                log_warning(
+                    "slack_write_edit_failed",
+                    channel_id=sync_channel.channel_id,
+                    error=slack_error_code(retry_exc) or str(retry_exc),
+                )
+                return False
         if used_user_token and code in _USER_WRITE_ERRORS | {"cant_update_message"}:
             log_info("slack_write_user_fallback_bot", channel_id=sync_channel.channel_id, error=code)
             try:

@@ -20,6 +20,7 @@ def make_event_context(**overrides: Any) -> EventContext:
         "event_subtype": None,
         "reply_broadcast": False,
         "content_blocks": [],
+        "block_file_ids": [],
     }
     ctx.update(overrides)  # type: ignore[typeddict-item]
     return ctx

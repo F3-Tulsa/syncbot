@@ -157,8 +157,9 @@ On the **same instance**, Slack-hosted files of any type (photos, video, PDFs, a
 - Slack often uploads the file a moment before it shares it into the Channel. SyncBot still copies that share.
 - If a Slack-hosted file cannot be copied, SyncBot DMs you with the error. The usual Free-plan stop is a workspace whose file storage is full.
 - A file whose copy lives outside Slack, such as a Google Drive or Dropbox file, is posted as its link on every target, on this instance and across External Connections. SyncBot does not download it and does not DM about it.
-- Slack-hosted video and image blocks are not copied as players. The file itself is uploaded so the other workspace can play it.
+- Slack-hosted video and image blocks are not copied as players. The file itself is uploaded so the other workspace can play it. That includes an image that an app shows from a Slack file inside its message.
 - GIFs from the Slack GIF picker or GIPHY stay public image blocks.
+- A table is copied. A video from another site is copied as a link to it. If Slack will not accept a message's layout in the other workspace, the copy is posted as text.
 - When the mapped author has authorized SyncBot in the target workspace, the share posts as that person. The file is the message. A caption, Block Kit, or a public GIF stays on that same message.
 - When they have not authorized, the share still posts as one message, with the same from line as other SyncBot posts: the author's name and photo, plus the workspace name when they are not mapped. A file with no text is just the file.
 

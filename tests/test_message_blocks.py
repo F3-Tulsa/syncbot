@@ -7,6 +7,7 @@ from handlers.message import _parse_event_fields
 from helpers.message_blocks import (
     build_content_blocks_for_sync,
     choose_message_text,
+    collect_slack_file_ids_from_blocks,
     event_has_slack_hosted_media_blocks,
     text_from_blocks,
 )
@@ -70,6 +71,24 @@ class TestContentBlocksForSync:
         blocks = build_content_blocks_for_sync([{"type": "image", "slack_file": {"id": "F123"}, "alt_text": "private"}])
         assert blocks == []
 
+    def test_collects_slack_file_ids_from_image_blocks(self):
+        blocks = [
+            {"type": "image", "slack_file": {"id": "F0EXAMPLE1"}, "alt_text": "one"},
+            {
+                "type": "image",
+                "slack_file": {"url": "https://ws-a.example/files/U0EXAMPLE/F0EXAMPLE2/photo.png"},
+                "alt_text": "two",
+            },
+            {
+                "type": "image",
+                "image_url": "https://files.slack.com/files-pri/T0EXAMPLE-F0EXAMPLE3/photo.png",
+                "alt_text": "three",
+            },
+            {"type": "image", "image_url": "https://ws-a.example/F0EXAMPLE4.png", "alt_text": "public"},
+            {"type": "image", "slack_file": {"id": "F0EXAMPLE1"}, "alt_text": "again"},
+        ]
+        assert collect_slack_file_ids_from_blocks(blocks) == ["F0EXAMPLE1", "F0EXAMPLE2", "F0EXAMPLE3"]
+
     def test_skips_slack_hosted_image_and_video_blocks(self):
         blocks = build_content_blocks_for_sync(
             [
@@ -91,14 +110,73 @@ class TestContentBlocksForSync:
                 },
                 {
                     "type": "video",
-                    "video_url": "https://www.youtube.com/embed/dQw4w9WgXcQ",
+                    "video_url": "https://peer.example/clip",
                     "title": {"type": "plain_text", "text": "public clip"},
                 },
             ]
         )
-        assert [b["type"] for b in blocks] == ["image", "video"]
+        assert [b["type"] for b in blocks] == ["image", "rich_text"]
         assert blocks[0]["image_url"] == "https://gif.example/a.gif"
-        assert blocks[1]["video_url"] == "https://www.youtube.com/embed/dQw4w9WgXcQ"
+        link = blocks[1]["elements"][0]["elements"][0]
+        assert link["url"] == "https://peer.example/clip"
+        assert link["text"] == "public clip"
+
+    def test_keeps_a_table_block(self):
+        blocks = build_content_blocks_for_sync(
+            [
+                {
+                    "type": "table",
+                    "block_id": "tbl",
+                    "rows": [
+                        [{"type": "raw_text", "text": "Ada"}],
+                        [{"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": []}]}],
+                    ],
+                }
+            ]
+        )
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "table"
+        assert "block_id" not in blocks[0]
+
+    def test_video_link_prefers_its_title_url(self):
+        blocks = build_content_blocks_for_sync(
+            [
+                {
+                    "type": "video",
+                    "video_url": "https://peer.example/clip",
+                    "title_url": "https://peer.example/watch",
+                    "title": {"type": "plain_text", "text": "Watch"},
+                }
+            ]
+        )
+        link = blocks[0]["elements"][0]["elements"][0]
+        assert link["url"] == "https://peer.example/watch"
+
+    def test_drops_slack_file_images_inside_section_and_context(self):
+        blocks = build_content_blocks_for_sync(
+            [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "Photo"},
+                    "accessory": {"type": "image", "slack_file": {"id": "F0EXAMPLE1"}, "alt_text": "photo"},
+                },
+                {
+                    "type": "context",
+                    "elements": [
+                        {"type": "image", "slack_file": {"id": "F0EXAMPLE2"}, "alt_text": "photo"},
+                        {"type": "mrkdwn", "text": "Workspace A"},
+                    ],
+                },
+                {
+                    "type": "context",
+                    "elements": [{"type": "image", "slack_file": {"id": "F0EXAMPLE3"}, "alt_text": "only"}],
+                },
+            ]
+        )
+        assert [b["type"] for b in blocks] == ["section", "context"]
+        assert "accessory" not in blocks[0]
+        assert blocks[0]["text"]["text"] == "Photo"
+        assert blocks[1]["elements"] == [{"type": "mrkdwn", "text": "Workspace A"}]
 
     def test_event_has_slack_hosted_media_blocks(self):
         assert event_has_slack_hosted_media_blocks(
@@ -141,6 +219,45 @@ class TestParseEventUsesBlocks:
         assert all(b["type"] != "actions" for b in ctx["content_blocks"])
         client.conversations_history.assert_not_called()
         client.conversations_replies.assert_not_called()
+
+    def test_bot_message_keeps_the_files_its_images_show(self):
+        body = {
+            "team_id": "T001",
+            "event": {
+                "type": "message",
+                "subtype": "bot_message",
+                "channel": "C001",
+                "text": "Backblast",
+                "ts": "1.0",
+                "blocks": [{"type": "image", "slack_file": {"id": "F0EXAMPLE1"}, "alt_text": "photo"}],
+            },
+        }
+        ctx = _parse_event_fields(body, MagicMock())
+        assert ctx["block_file_ids"] == ["F0EXAMPLE1"]
+
+    def test_bot_message_without_blocks_keeps_the_files_its_images_show(self):
+        body = {
+            "team_id": "T001",
+            "event": {
+                "type": "message",
+                "subtype": "bot_message",
+                "bot_id": "B001",
+                "channel": "C001",
+                "text": "Backblast",
+                "ts": "1.0",
+            },
+        }
+        client = MagicMock()
+        client.conversations_replies.return_value = {
+            "messages": [
+                {
+                    "text": "Backblast",
+                    "blocks": [{"type": "image", "slack_file": {"id": "F0EXAMPLE1"}, "alt_text": "photo"}],
+                }
+            ]
+        }
+        ctx = _parse_event_fields(body, client)
+        assert ctx["block_file_ids"] == ["F0EXAMPLE1"]
 
     def test_bot_message_without_blocks_loads_replies(self):
         body = {

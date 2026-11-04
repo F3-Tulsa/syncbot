@@ -169,6 +169,50 @@ class TestHostedFiles:
         assert len(passed) == 21
         assert passed[20]["id"] == "F20"
 
+    def test_build_file_context_downloads_a_file_an_image_block_shows(self):
+        body = _message_body(subtype="bot_message", text="Backblast")
+        body["event"]["blocks"] = [{"type": "image", "slack_file": {"id": "F0EXAMPLE1"}, "alt_text": "photo"}]
+        shown = {
+            "id": "F0EXAMPLE1",
+            "url_private": "https://files.slack.com/files-pri/T0EXAMPLE-F0EXAMPLE1/photo.png",
+            "name": "photo.png",
+        }
+        client = MagicMock()
+        client.files_info.return_value = {"file": shown}
+        with patch("handlers.message.helpers.download_slack_files", return_value=[]) as dl:
+            _build_file_context(body, client, MagicMock(), block_file_ids=["F0EXAMPLE1"])
+        client.files_info.assert_called_once_with(file="F0EXAMPLE1")
+        assert dl.call_args.args[0] == [shown]
+
+    def test_build_file_context_reads_a_listed_file_once(self):
+        listed = {
+            "id": "F0EXAMPLE1",
+            "url_private": "https://files.slack.com/files-pri/T0EXAMPLE-F0EXAMPLE1/photo.png",
+            "name": "photo.png",
+        }
+        body = _message_body(subtype="bot_message", files=[listed])
+        client = MagicMock()
+        with patch("handlers.message.helpers.download_slack_files", return_value=[]) as dl:
+            _build_file_context(body, client, MagicMock(), block_file_ids=["F0EXAMPLE1"])
+        client.files_info.assert_not_called()
+        assert dl.call_args.args[0] == [listed]
+
+    def test_build_file_context_goes_on_when_a_shown_file_cannot_be_read(self):
+        from slack_sdk.errors import SlackApiError
+
+        body = _message_body(subtype="bot_message", text="Backblast")
+        client = MagicMock()
+        client.files_info.side_effect = SlackApiError("missing", {"ok": False, "error": "file_not_found"})
+        with (
+            patch("handlers.message.helpers.download_slack_files", return_value=[]) as dl,
+            patch("handlers.message.log_error") as log_error,
+        ):
+            _build_file_context(body, client, MagicMock(), block_file_ids=["F0EXAMPLE1"])
+        assert dl.call_args.args[0] == []
+        matched = [call for call in log_error.call_args_list if call.args and call.args[0] == "file_share_failed"]
+        assert matched
+        assert matched[0].kwargs["reason"] == "files_info_failed"
+
     def test_gif_attachment_stays_when_a_file_is_also_shared(self):
         body = _message_body(
             text="see https://example.com/notes",

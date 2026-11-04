@@ -78,7 +78,8 @@ def _parse_event_fields_light(body: dict) -> EventContext:
     :func:`_enrich_event_fields_for_sync` after membership and publish gates.
     """
     event: dict = body.get("event", {})
-    layout_blocks = helpers.build_content_blocks_for_sync(helpers.get_event_layout_blocks(event))
+    raw_blocks = helpers.get_event_layout_blocks(event)
+    layout_blocks = helpers.build_content_blocks_for_sync(raw_blocks)
     event_text = helpers.safe_get(event, "text") or helpers.safe_get(event, "message", "text")
     msg_text = helpers.choose_message_text(event_text, layout_blocks)
     ts = (
@@ -98,15 +99,19 @@ def _parse_event_fields_light(body: dict) -> EventContext:
         event_subtype=helpers.safe_get(event, "subtype"),
         reply_broadcast=helpers.safe_get(event, "subtype") in ("thread_broadcast", "reply_broadcast"),
         content_blocks=layout_blocks,
+        block_file_ids=helpers.collect_slack_file_ids_from_blocks(raw_blocks),
     )
 
 
 def _enrich_event_fields_for_sync(body: dict, client: WebClient, ctx: EventContext) -> EventContext:
     """Resolve mentions and bot layout via Slack after publish gates pass."""
     event: dict = body.get("event", {})
+    raw_event_blocks = helpers.get_event_layout_blocks(event)
     layout_blocks = list(ctx.get("content_blocks") or [])
-    if not layout_blocks and _event_is_bot_post(event):
-        layout_blocks = helpers.build_content_blocks_for_sync(helpers.fetch_message_layout_blocks(client, event))
+    if not layout_blocks and not raw_event_blocks and _event_is_bot_post(event):
+        fetched_blocks = helpers.fetch_message_layout_blocks(client, event)
+        ctx["block_file_ids"] = helpers.collect_slack_file_ids_from_blocks(fetched_blocks)
+        layout_blocks = helpers.build_content_blocks_for_sync(fetched_blocks)
         event_text = helpers.safe_get(event, "text") or helpers.safe_get(event, "message", "text")
         ctx["msg_text"] = helpers.choose_message_text(event_text, layout_blocks)
         ctx["content_blocks"] = layout_blocks
@@ -132,7 +137,12 @@ def _parse_event_fields(body: dict, client: WebClient) -> EventContext:
     return _enrich_event_fields_for_sync(body, client, _parse_event_fields_light(body))
 
 
-def _build_file_context(body: dict, client: WebClient, logger: Logger) -> tuple[list[dict], list[dict]]:
+def _build_file_context(
+    body: dict,
+    client: WebClient,
+    logger: Logger,
+    block_file_ids: list[str] | None = None,
+) -> tuple[list[dict], list[dict]]:
     """Process files attached to a message event.
 
     Returns ``(photo_blocks, direct_files)`` where:
@@ -141,6 +151,9 @@ def _build_file_context(body: dict, client: WebClient, logger: Logger) -> tuple[
       (e.g. GIF picker URLs), ready for ``chat.postMessage``.
     * *direct_files* — files downloaded to ``/tmp`` for direct upload to
       each target channel.
+
+    An image block that shows a Slack file not in ``files`` is read with
+    ``files.info`` and downloaded the same way.
     """
     event = body.get("event", {})
     files = helpers.safe_get(event, "files") or helpers.safe_get(event, "message", "files") or []
@@ -151,7 +164,28 @@ def _build_file_context(body: dict, client: WebClient, logger: Logger) -> tuple[
     is_edit = event_subtype in ("message_changed", "message_deleted")
 
     if not is_edit:
-        direct_files = helpers.download_slack_files(files, client, logger)
+        hosted = list(files) if isinstance(files, list) else []
+        seen = {item.get("id") for item in hosted if isinstance(item, dict) and item.get("id")}
+        for file_id in block_file_ids or []:
+            if file_id in seen:
+                continue
+            try:
+                info = client.files_info(file=file_id)
+            except Exception as exc:
+                from helpers.slack_api import slack_error_code
+
+                log_error(
+                    "file_share_failed",
+                    reason="files_info_failed",
+                    file_id=file_id,
+                    error=slack_error_code(exc),
+                )
+                continue
+            file_obj = info.get("file") if isinstance(info, dict) or hasattr(info, "get") else None
+            if isinstance(file_obj, dict):
+                hosted.append(file_obj)
+                seen.add(file_id)
+        direct_files = helpers.download_slack_files(hosted, client, logger)
 
     # Public GIF/image URLs (GIPHY, Slack GIF picker) stay on the message even
     # when a hosted file is attached too. Slack-hosted thumbs are the file.
@@ -710,7 +744,12 @@ def respond_to_message_event(
             file_body = {**body, "event": event}
         if has_targets:
             _enrich_event_fields_for_sync(file_body, client, ctx)
-            photo_blocks, direct_files = _build_file_context(file_body, client, logger)
+            photo_blocks, direct_files = _build_file_context(
+                file_body,
+                client,
+                logger,
+                block_file_ids=ctx.get("block_file_ids") or [],
+            )
             if outside_files:
                 ctx["msg_text"], ctx["content_blocks"] = helpers.add_outside_file_links(
                     ctx.get("msg_text"),
@@ -764,7 +803,7 @@ def respond_to_message_event(
             )
             log_debug("message_skip", reason="empty_file_share", has_files=has_files, **trace)
             return
-        if is_create and text_blank and not has_files and has_targets:
+        if is_create and text_blank and not has_files and not ctx.get("content_blocks") and has_targets:
             log_debug("message_skip", reason="empty_file_share", has_files=has_files, **trace)
             return
         if is_create:

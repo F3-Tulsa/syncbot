@@ -154,6 +154,7 @@ class TestEventContextType:
             event_subtype=None,
             reply_broadcast=False,
             content_blocks=[],
+            block_file_ids=[],
         )
         assert isinstance(ctx, dict)
         assert ctx["team_id"] == "T1"
