@@ -147,6 +147,11 @@ def _close_modal_done(client, body: dict, message: str) -> None:
         log_warning("modal_close_failed", error=str(exc))
 
 
+def _counted(count: int, singular: str, plural: str) -> str:
+    """Code-ticked count and the word for it, as Home and confirm modals show counts."""
+    return f"`{count}` {singular if count == 1 else plural}"
+
+
 def _dm_user(client, user_id: str | None, message: str) -> None:
     """Send *message* to *user_id* as a DM, ignoring failures.
 

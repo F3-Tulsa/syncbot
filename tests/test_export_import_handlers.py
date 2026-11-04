@@ -163,7 +163,8 @@ class TestDataMigrationModal:
         assert ":link:" not in text
         assert "sends it to you in a DM" in text
         assert "no tokens or passwords" in text
-        assert "from this install or from a connected install" in text
+        assert "from this instance or from a connected instance" in text
+        assert "You will see what is in it" in text
 
     def test_export_confirms_in_modal_after_dm(self):
         from types import SimpleNamespace
@@ -337,11 +338,11 @@ class TestDataMigrationImportConnect:
         assert "Partner Org" not in text
         assert "connection code" not in text
         assert "Workspace Group" in text
-        assert "1 Sync (`Announcements`)" in text
-        assert "1 Channel" in text
-        assert "1 message" in text
-        assert "1 person is mapped between Workspaces." in text
-        assert text.count("1 person is mapped") == 1
+        assert "`1` Sync (`Announcements`)" in text
+        assert "`1` Channel" in text
+        assert "`1` message" in text
+        assert "`1` person is mapped between Workspaces." in text
+        assert text.count("person is mapped") == 1
 
     def test_review_names_a_workspace_that_is_not_here(self):
         from types import SimpleNamespace
@@ -395,11 +396,11 @@ class TestDataMigrationImportConnect:
 
         text = str(resp["view"])
         assert resp["view"]["submit"]["text"] == "Import"
-        assert "`Workspace B` isn't on this install yet" in text
-        assert "won't come over" in text
+        assert "`Workspace B` is not on this instance yet" in text
+        assert "will not come over" in text
         assert "Workspace C" not in text
         assert "connection code" not in text
-        assert "exported from this install" in text
+        assert "exported from this instance" in text
         assert "start right away" in text
         assert not any(block.get("type") == "input" for block in resp["view"]["blocks"])
 
@@ -441,7 +442,7 @@ class TestDataMigrationImportConnect:
         ):
             resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
         text = str(resp["view"])
-        assert "but this Workspace isn't in it" in text
+        assert "but this Workspace is not in it" in text
         assert "Ask an Owner of `B Group`" in text
 
     def test_import_does_not_open_a_connection(self):
@@ -542,7 +543,7 @@ class TestDataMigrationImportConnect:
         ):
             resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
         text = str(resp["view"])
-        assert "This file was exported from this install." in text
+        assert "This file was exported from this instance." in text
         assert "they start right away" in text
         assert not any(block.get("type") == "input" for block in resp["view"]["blocks"])
 
@@ -634,8 +635,9 @@ class TestDataMigrationImportConnect:
         ):
             resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
         text = str(resp["view"])
-        assert "This file is from `Partner Org`, a connected SyncBot install." in text
-        assert "once no connected install still has SyncBot" in text
+        assert "This file is from `Partner Org`, a connected SyncBot instance." in text
+        assert "Syncs start once `Partner Org` no longer has SyncBot in this Workspace." in text
+        assert "If it is already removed there, they start right away." in text
         assert not any(block.get("type") == "input" for block in resp["view"]["blocks"])
 
     def test_finished_dm_covers_running_waiting_unreachable_and_what_was_left_out(self):
@@ -662,7 +664,7 @@ class TestDataMigrationImportConnect:
         cases = [
             (("resumed", None), [], "This Workspace's Syncs are running."),
             (("waiting_for_uninstall", peer), [pending], "Waiting for migration"),
-            (("unreachable", peer), [pending], "couldn't reach `Partner Org`"),
+            (("unreachable", peer), [pending], "could not reach `Partner Org`"),
             (("refused", peer), [pending], "`Partner Org` did not accept SyncBot's check"),
         ]
         for release, rows, expected in cases:
@@ -717,9 +719,7 @@ class TestDataMigrationImportConnect:
         ):
             handle_data_migration_review(body, MagicMock(), MagicMock(), {})
         message = dm.call_args.args[2]
-        assert "This Workspace's Syncs are running." in message
-        assert "couldn't reach `Partner Org`" in message
-        assert "Waiting for migration" not in message
+        assert message == ":white_check_mark: Import finished. This Workspace's Syncs are running."
 
     def test_review_import_dms_when_expired(self):
         from handlers.export_import import handle_data_migration_review

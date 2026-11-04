@@ -881,7 +881,7 @@ class TestExternalConnectionModals:
         ):
             result = handle_join_external_connection_submit_ack(body, MagicMock(), {})
         assert result["response_action"] == "errors"
-        assert "this SyncBot install" in result["errors"]["join_external_connection_code"]
+        assert "this SyncBot instance" in result["errors"]["join_external_connection_code"]
 
     def test_join_review_refuses_a_different_response_key(self):
         from handlers.federation_cmds import handle_join_external_connection_review

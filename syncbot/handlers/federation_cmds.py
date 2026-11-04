@@ -642,7 +642,7 @@ def handle_join_external_connection_submit_ack(body: dict, client: WebClient, co
             "response_action": "errors",
             "errors": {
                 actions.CONFIG_JOIN_EXTERNAL_CONNECTION_CODE: (
-                    "That code is from this SyncBot install. Paste a code from the other instance."
+                    "That code is from this SyncBot instance. Paste a code from the other instance."
                 )
             },
         }

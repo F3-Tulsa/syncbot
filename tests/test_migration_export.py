@@ -648,7 +648,7 @@ def test_review_refuses_a_file_with_no_signature():
     ):
         resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
     assert resp["response_action"] == "errors"
-    assert "can't check this file" in resp["errors"]["data_migration_json_input"]
+    assert "cannot check this file" in resp["errors"]["data_migration_json_input"]
     assert "1.7.3" in resp["errors"]["data_migration_json_input"]
     cache_set.assert_not_called()
 
@@ -1111,7 +1111,7 @@ def test_confirm_import_does_not_add_a_status_line():
     )
     text = "\n".join(getattr(block, "label", "") or "" for block in blocks)
     assert "Partner Org" in text
-    assert "• `Partner Org`: 1 Sync (`Announcements`), 1 Channel, 0 messages" in text
+    assert "• `Partner Org`: `1` Sync (`Announcements`), `1` Channel, `0` messages" in text
     assert "Deleted Status" not in text
     assert "Disbanded" not in text
     assert "\nStatus:" not in text
@@ -1138,10 +1138,10 @@ def test_overview_uses_plain_counts():
         }
     )
     text = "\n".join(getattr(block, "label", "") or "" for block in blocks)
-    assert "*What's in it*" in text
-    assert "• `Live Group`: 2 Syncs (`Daily`, `Announcements`), 6 Channels, 1,204 messages" in text
+    assert "*What is in this file*" in text
+    assert "• `Live Group`: `2` Syncs (`Daily`, `Announcements`), `6` Channels, `1204` messages" in text
     assert "• `Empty Group`: no Syncs" in text
-    assert text.count("12 people are mapped between Workspaces.") == 1
+    assert text.count("`12` people are mapped between Workspaces.") == 1
 
 
 def test_overview_uses_singular_words_and_says_when_there_are_no_groups():
@@ -1157,8 +1157,8 @@ def test_overview_uses_singular_words_and_says_when_there_are_no_groups():
         }
     )
     text = "\n".join(getattr(block, "label", "") or "" for block in one)
-    assert "• `Live Group`: 1 Sync (`Daily`), 1 Channel, 1 message" in text
-    assert "1 person is mapped between Workspaces." in text
+    assert "• `Live Group`: `1` Sync (`Daily`), `1` Channel, `1` message" in text
+    assert "`1` person is mapped between Workspaces." in text
 
     empty = _migration_overview_blocks({"groups": [], "syncs": [], "sync_channels": [], "user_mappings": []})
     empty_text = "\n".join(getattr(block, "label", "") or "" for block in empty)

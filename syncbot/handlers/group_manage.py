@@ -8,6 +8,7 @@ from slack_sdk.web import WebClient
 import builders
 import helpers
 from db import DbManager, schemas
+from handlers._common import _counted
 from helpers.leave_sync import soft_delete_sync_channels
 from logger import log_info, log_warning
 from slack import actions, orm
@@ -637,10 +638,6 @@ def _disband_denial_message(reason: str, group_name: str, group_id: int, workspa
         f':lock: *You are not an Owner of "{group_name}", so you cannot disband it.*\n\n'
         "Only the group's sole Owner can disband a group."
     )
-
-
-def _counted(count: int, singular: str, plural: str) -> str:
-    return f"`{count}` {singular if count == 1 else plural}"
 
 
 def _disband_confirm_blocks(

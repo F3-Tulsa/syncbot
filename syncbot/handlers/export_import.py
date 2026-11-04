@@ -11,7 +11,7 @@ import builders
 import constants
 import helpers
 from db import DbManager, schemas
-from handlers._common import _close_modal_done, _update_wait_modal, _wait_modal_ack
+from handlers._common import _close_modal_done, _counted, _update_wait_modal, _wait_modal_ack
 from helpers import export_import as ei
 from helpers.workspace import invalidate_fed_ws_for_sync_cache
 from logger import log_error, log_warning
@@ -438,8 +438,8 @@ def handle_data_migration(
             orm.SectionBlock(
                 label=(
                     "*Import*\n"
-                    "Upload a file exported from this install or from a connected install. "
-                    "You'll see what's in it before anything changes."
+                    "Upload a file exported from this instance or from a connected instance. "
+                    "You will see what is in it before anything changes."
                 ),
             ),
         ]
@@ -667,11 +667,6 @@ def _migration_message_count(post_meta: dict, sync_uid: str, channel_id: str) ->
     return count
 
 
-def _count_phrase(count: int, singular: str, plural: str) -> str:
-    word = singular if count == 1 else plural
-    return f"{count:,} {word}"
-
-
 def _migration_overview_blocks(data: dict) -> list:
     """Plain-language Group, Sync, Channel, and mapping counts from the file."""
     from slack.blocks import section
@@ -686,7 +681,7 @@ def _migration_overview_blocks(data: dict) -> list:
         uid = str(channel.get("sync_uid") or "")
         if uid:
             channels_by_sync.setdefault(uid, []).append(channel)
-    blocks = [section("*What's in it*")]
+    blocks = [section("*What is in this file*")]
     if not groups:
         blocks.append(section("No Groups."))
     for group in groups:
@@ -710,16 +705,15 @@ def _migration_overview_blocks(data: dict) -> list:
             title_line = " (" + ", ".join(f"`{title}`" for title in titles) + ")"
         blocks.append(
             section(
-                f"• `{name}`: {_count_phrase(len(group_syncs), 'Sync', 'Syncs')}{title_line}, "
-                f"{_count_phrase(channel_count, 'Channel', 'Channels')}, "
-                f"{_count_phrase(message_count, 'message', 'messages')}"
+                f"• `{name}`: {_counted(len(group_syncs), 'Sync', 'Syncs')}{title_line}, "
+                f"{_counted(channel_count, 'Channel', 'Channels')}, "
+                f"{_counted(message_count, 'message', 'messages')}"
             )
         )
     mapped_count = len(mappings)
-    if mapped_count == 1:
-        blocks.append(section("1 person is mapped between Workspaces."))
-    elif mapped_count:
-        blocks.append(section(f"{mapped_count:,} people are mapped between Workspaces."))
+    if mapped_count:
+        verb = "is" if mapped_count == 1 else "are"
+        blocks.append(section(f"{_counted(mapped_count, 'person', 'people')} {verb} mapped between Workspaces."))
     return blocks
 
 
@@ -834,47 +828,29 @@ def _format_workspace_names(names: list[str]) -> str:
 
 def _missing_workspaces_text(names: list[str], *, finished: bool = False) -> str:
     label = _format_workspace_names(names)
+    outcome = "were left out" if finished else "will not come over"
     if len(names) == 1:
-        if finished:
-            return (
-                f":warning: {label} isn't on this install yet, so its Channels were left out. "
-                "Import this file again once it's here."
-            )
         return (
-            f":warning: {label} isn't on this install yet, so its Channels won't come over. "
-            "Import this file again once it's here."
-        )
-    if finished:
-        return (
-            f":warning: {label} aren't on this install yet, so their Channels were left out. "
-            "Import this file again once they're here."
+            f":warning: {label} is not on this instance yet, so its Channels {outcome}. "
+            "Import this file again once it is here."
         )
     return (
-        f":warning: {label} aren't on this install yet, so their Channels won't come over. "
-        "Import this file again once they're here."
+        f":warning: {label} are not on this instance yet, so their Channels {outcome}. "
+        "Import this file again once they are here."
     )
 
 
 def _left_out_groups_text(names: list[str], *, finished: bool = False) -> str:
     label = _format_workspace_names(names)
     if len(names) == 1:
-        owner = f"`{names[0]}`"
-        if finished:
-            return (
-                f":warning: {label} is already on this install, but this Workspace isn't in it, "
-                f"so it was left out. Ask an Owner of {owner} to invite this Workspace, then import again."
-            )
+        left_out = ", so it was left out" if finished else ""
         return (
-            f":warning: {label} is already on this install, but this Workspace isn't in it. "
-            f"Ask an Owner of {owner} to invite this Workspace, then import again."
+            f":warning: {label} is already on this instance, but this Workspace is not in it{left_out}. "
+            f"Ask an Owner of {label} to invite this Workspace, then import again."
         )
-    if finished:
-        return (
-            f":warning: {label} are already on this install, but this Workspace isn't in them, "
-            "so they were left out. Ask an Owner of each to invite this Workspace, then import again."
-        )
+    left_out = ", so they were left out" if finished else ""
     return (
-        f":warning: {label} are already on this install, but this Workspace isn't in them. "
+        f":warning: {label} are already on this instance, but this Workspace is not in them{left_out}. "
         "Ask an Owner of each to invite this Workspace, then import again."
     )
 
@@ -901,49 +877,40 @@ def _import_finished_text(
     source_kind: str,
     has_pending: bool,
 ) -> str:
+    """One message for the import's result, then anything that was left out.
+
+    With no ``pending`` Channel left, the Syncs are running, so the message
+    says that and nothing about a peer.
+    """
     peer_name = source_name
     if peer is not None:
         peer_name = ei.migration_source_name(getattr(peer, "instance_id", "") or "", peer)
-    running_here = ":white_check_mark: Import finished. This Workspace's Syncs are running."
-    running_connected = (
-        f":white_check_mark: Import finished. `{source_name}` no longer has this Workspace, "
-        "so its Syncs are running."
-    )
-    if not has_pending:
-        if result == "resumed" and source_kind == "connected":
-            text = running_connected
-        else:
-            text = running_here
-        if result == "waiting_for_uninstall":
-            text += f" `{peer_name}` still has this Workspace."
-        elif result == "unreachable":
-            text += (
-                f" SyncBot couldn't reach `{peer_name}` to check. "
-                "If a move is still in progress, try the import again in a few minutes."
-            )
-    elif result == "waiting_for_uninstall":
+    if has_pending and result == "waiting_for_uninstall":
         text = (
             ":white_check_mark: Import finished. This Workspace's Syncs show `Waiting for migration` "
             f"until `{peer_name}` removes SyncBot from this Workspace. They start on their own after that. "
-            "If they don't, import this file again."
+            "If they do not, import this file again."
         )
-    elif result == "unreachable":
+    elif has_pending and result == "unreachable":
         text = (
-            ":warning: Import couldn't finish. "
-            f"SyncBot couldn't reach `{peer_name}` to check whether it still has this Workspace, "
+            ":warning: Import could not finish. "
+            f"SyncBot could not reach `{peer_name}` to check whether it still has this Workspace, "
             "so its Syncs show `Waiting for migration`. Try the import again in a few minutes."
         )
-    elif result == "refused":
+    elif has_pending and result == "refused":
         text = (
             f":warning: Import could not finish. `{peer_name}` did not accept SyncBot's check, "
             "so this Workspace's Syncs show `Waiting for migration`. "
             f"A primary Workspace admin can check the External Connection with `{peer_name}`, "
             "then import this file again."
         )
-    elif source_kind == "connected":
-        text = running_connected
+    elif result == "resumed" and source_kind == "connected":
+        text = (
+            f":white_check_mark: Import finished. `{source_name}` no longer has this Workspace, "
+            "so its Syncs are running."
+        )
     else:
-        text = running_here
+        text = ":white_check_mark: Import finished. This Workspace's Syncs are running."
     team_id = getattr(workspace, "team_id", "") or ""
     workspace_id = getattr(workspace, "id", None)
     missing = _migration_workspace_names_not_here(data, team_id)
@@ -978,7 +945,7 @@ def handle_data_migration_submit_ack(
             "errors": {actions.CONFIG_DATA_MIGRATION_JSON_INPUT: _migration_refused_text(kind, name)},
         }
     source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else {}
-    instance_id = str(source.get("instance_id") or "")
+    source_name = ei.migration_source_name(str(source.get("instance_id") or ""), signer)
     from helpers._cache import _cache_set
 
     _cache_set(
@@ -988,20 +955,17 @@ def handle_data_migration_submit_ack(
             "group_id": group_id,
             "workspace_id": workspace_record.id,
             "team_id_to_workspace_id": team_id_to_workspace_id,
-            "source_instance_id": instance_id,
-            "source_name": ei.migration_source_name(instance_id, signer),
-            "source_kind": kind,
+            "source_name": source_name,
         },
         ttl=600,
     )
     from slack.blocks import section
 
-    source_name = ei.migration_source_name(instance_id, signer)
     blocks = []
     if kind == "connected":
-        blocks.append(section(f":package: This file is from `{source_name}`, a connected SyncBot install."))
+        blocks.append(section(f":package: This file is from `{source_name}`, a connected SyncBot instance."))
     else:
-        blocks.append(section(":package: This file was exported from this install."))
+        blocks.append(section(":package: This file was exported from this instance."))
     blocks.extend(_migration_overview_blocks(data))
     missing = _migration_workspace_names_not_here(data, workspace_record.team_id)
     if missing:
@@ -1013,15 +977,15 @@ def handle_data_migration_submit_ack(
         blocks.append(
             section(
                 f"Import brings over this Workspace and `{source_name}`'s Workspaces. "
-                "Syncs start once no connected install still has SyncBot in this Workspace. "
-                "If that's already true, they start right away."
+                f"Syncs start once `{source_name}` no longer has SyncBot in this Workspace. "
+                "If it is already removed there, they start right away."
             )
         )
     else:
         blocks.append(
             section(
                 "Import adds these Groups and Syncs back to this Workspace, and they start right away, "
-                "unless another connected install still has SyncBot in this Workspace."
+                "unless another connected instance still has SyncBot in this Workspace."
             )
         )
     review = orm.BlockView(blocks=blocks)
@@ -1043,12 +1007,12 @@ _IMPORT_EXPIRED_TEXT = ":warning: That import expired. Try the import again."
 def _migration_refused_text(kind: str, name: str) -> str:
     if kind == "tampered":
         return (
-            "This file was changed after it was exported. SyncBot won't import it. "
-            "Export it again from the install that made it."
+            "This file was changed after it was exported, so SyncBot will not import it. "
+            "Export it again from the instance that made it."
         )
     if kind == "unchecked":
         return (
-            "SyncBot can't check this file. Export it again from this install or from a connected install. "
+            "SyncBot cannot check this file. Export it again from this instance or from a connected instance. "
             "A file from before 1.7.3 needs a new export."
         )
     if kind == "federation_off":
@@ -1062,20 +1026,13 @@ def _migration_refused_text(kind: str, name: str) -> str:
             "A primary Workspace admin can set up the External Connection again, then import this file again."
         )
     return (
-        f"SyncBot doesn't know the install that signed this file (`{name}`). "
-        "If it came from a SyncBot install you trust, a primary Workspace admin can connect the two installs "
+        f"SyncBot does not know the instance that signed this file (`{name}`). "
+        "If it came from a SyncBot instance you trust, a primary Workspace admin can connect the two instances "
         "under External Connections, then import it again."
     )
 
 
 def _migration_stopped_text(kind: str, name: str) -> str:
-    if kind == "tampered":
-        return ":warning: Import stopped. This file was changed after it was exported. SyncBot won't import it."
-    if kind == "unchecked":
-        return (
-            ":warning: Import stopped. SyncBot can't check this file. "
-            "Export it again from this install or from a connected install."
-        )
     if kind == "federation_off":
         return (
             ":warning: Import stopped. Federation is off. "
@@ -1083,7 +1040,7 @@ def _migration_stopped_text(kind: str, name: str) -> str:
         )
     return (
         f":warning: Import stopped. `{name}` is no longer connected here. "
-        "Connect it again under External Connections, then import the file again."
+        "A primary Workspace admin can connect it again under External Connections, then import this file again."
     )
 
 
