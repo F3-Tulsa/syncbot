@@ -1,29 +1,127 @@
 # Backup, Restore, and Data Migration
 
-## Full-Instance Backup and Restore
+This page covers three tools:
 
-**`PRIMARY_WORKSPACE`** must be set to a Slack Team ID for backup and restore to show up. When it is set, the **Backup/Restore** button appears only in that workspace. When it is unset, backup and restore are hidden everywhere.
+- **Backup** saves a copy of your SyncBot instance, so you can restore it after something goes wrong.
+- **Reset Database** wipes the instance and starts it over, empty.
+- **Data Migration** moves one Workspace from one SyncBot instance to another.
 
-Use **Backup/Restore** on the Home tab (next to Refresh) to:
+## Full-instance backup and restore
 
-- **Download backup** — Generates a JSON file of the durable tables (workspaces, groups, syncs, channels, post meta, user directory, user mappings, instances, instance Settings, federation allowlists and pairing rows). Ephemeral Slack `event_id` claims, user-token echo rows, and in-flight federation file parts are not included. The file is sent to your DM. The backup includes an HMAC for integrity, a hash of the encryption key, and the SyncBot version that produced it (a label only; restore does not require that version to match). **Use the same `DATA_ENCRYPTION_KEY` on the target instance** so restored bot and user tokens decrypt; otherwise workspaces must reinstall the app to re-authorize.
-- **Restore from backup** — Paste the backup JSON in the modal and submit. Restore is meant for an **empty or fresh database** (for example after a rebuild). If the encryption key hash or HMAC does not match, you will see a warning and can still proceed (for example if you edited the file on purpose). Restore does not bring back the saved public URL. SyncBot learns it again from the next Slack request.
+Only the primary Workspace has this. Its Slack admins see **Backup/Restore** on the Home tab, next to Refresh. If your instance does not have `PRIMARY_WORKSPACE` set, then nobody sees the button.
 
-After restore, Home tab caches are cleared so the next Refresh shows current data.
+### Download a backup
 
-## Reset Database
+Choose **Download backup**, and SyncBot sends you the file in a DM. The file holds:
 
-Setting **`ENABLE_DB_RESET=true`** (with `PRIMARY_WORKSPACE` matching the current workspace) shows a **Reset Database** button on the Home tab. This is an advanced, destructive feature: it drops and reinitializes the entire database. The deploy scripts do not prompt for it. Set it in the env file (AWS `--setup-github` copies it when present) or in SAM / Terraform (`EnableDbReset` / `enable_db_reset`).
+- Your Groups, Syncs, and Channels.
+- The message history that keeps threads and reactions connected.
+- People, and who is mapped to whom.
+- Your External Connections.
+- Your settings.
+- Each Workspace's SyncBot install.
 
-## Workspace Data Migration
+Keep the file somewhere safe.
 
-**Data Migration** is on the SyncBot Configuration row for Slack admins. It has **Export** and **Import**, with Federation on or off.
+Restore it on an instance that uses the same encryption key (`DATA_ENCRYPTION_KEY`). With a different key the restore still runs, but every Workspace has to reinstall SyncBot and authorize again.
 
-- **Export** — Download this Workspace's SyncBot data (syncs, sync channels, post meta, user directory, user mappings; no tokens, instance private key, or in-flight file parts) as a JSON file in your DM. A disbanded group, and a group this Workspace is no longer in, is not in that file. The full-instance backup still keeps those rows. The file includes each group member's role. An older file with no role does not demote an owner and does not promote a member. Export only prepares the file. Creating a connection only creates the connection. Groups and Channel Syncs reconnect once the old instance has released the workspace, whichever of import and uninstall happens first, and owner status from the file is restored then. The file can include private Channel ids, names, and who brought SyncBot into them. The export modal stays open with Close while SyncBot DMs the file. Post meta covers every Channel in those Syncs, including copies on other Workspaces, so replies, edits, and reactions on older messages still find the other Workspace's copy after import. Channel names and other Workspace names travel with the file so Home can show `#name` instead of a Slack id. The file records the SyncBot version that produced it (a label only; import does not require that version to match). It names the instance that made it, by instance id and public key, and is signed with that instance's Ed25519 key. Import accepts the file on this instance, or on an instance connected to this one.
-- **Import** — Upload a migration JSON file for this Workspace. A file for another Workspace is refused, and so is a file that this instance or a connected instance did not sign. That includes a changed file, a file from an instance that is not an active connection here, and a file from before 1.7.3, which needs a new export. Moving a Workspace needs the old instance connected and reachable. If the old instance is gone, the Workspace starts over on this instance. Confirm Import says where the file came from and what is in it. Each Group in the file gets its own block with its name, this Workspace's Synced Channels, its Mapped Users, and its Synced Messages. It also names anything Import will leave out: a Workspace that is not on this instance yet, and a Group that is already here without this Workspace. There is no second choice. A file exported from this instance adds its Groups and Syncs back to this Workspace, and they start right away, unless another connected instance still has SyncBot in this Workspace. A file from a connected instance brings over this Workspace and that instance's Workspaces. Until SyncBot is uninstalled from this Workspace on that instance, this Workspace's Syncs show `Waiting for migration`, and they start on their own after that. If it is already uninstalled there, they start right away. Another connected instance that still has SyncBot in this Workspace also keeps them waiting. Import does not create, join, or change an External Connection. To move a Workspace, a primary Workspace admin uses Create Connection, the other instance uses Join, and then the file is imported. The modal stays open with Close, and SyncBot DMs the result, or a failure or expiry. The DM says whether the Syncs are running or waiting, and repeats anything that was left out. If SyncBot cannot reach a connected instance, the Syncs keep waiting, and the DM says to try the import again in a few minutes. If that instance does not accept the check, the DM asks a primary Workspace admin to check the External Connection first. Importing the same file again is safe. Import the file again once a missing Workspace is here, or after an Owner invites this Workspace to a Group that was left out. Import merges Groups and Syncs by `uid`, and it changes only this Workspace and Workspaces on a connected instance. Another Workspace on this instance keeps its own Groups, Syncs, and mappings. An existing Sync stays in its Group. A new Group from the file starts with only this Workspace, and its other members and their Channels arrive from the connected instance on keep-warm. Historical PostMeta for a Channel comes from the file, not from keep-warm. Import cannot invent the other Workspace's copy when it was never recorded. User mappings are imported when one side is this Workspace and the other is on a connected instance.
+### Restore a backup
 
-After import, Home tab caches for that workspace are cleared. If the old instance still has this Workspace installed, its Channel rows stay pending until that instance is uninstalled. Once it has released the Workspace, SyncBot joins the public Channels and posts one Resume notice, and private Channels stay paused with a notice. The other Channels in the Sync get that same notice.
+Use restore on a new or empty instance, for example after a rebuild.
 
-### Convert when a team is still live here
+1. Open **Backup/Restore** and upload your backup file.
+2. Submit. If the file was changed after it was made, or came from an instance with a different encryption key, SyncBot warns you and asks before it goes on.
+3. When the restore finishes, choose **Refresh** on the Home tab.
 
-When a peer connects and sends a `team_id` that is still installed on this SyncBot, this install does **not** strip the live workspace. It records a pending stub claim, DMs admins once, and blocks remote federation traffic for that live team until SyncBot is uninstalled here. After uninstall, the pending claim converts the row into a stub for the trusted peer. Leave Connection soft-deletes those remote Workspaces for the same retention window (their Channel rows become `uninstalled`) instead of deleting them; reconnecting, reinstalling on this instance, or importing that Workspace's migration file restores the row and keeps PostMeta. See [ARCHITECTURE.md](ARCHITECTURE.md) for details.
+## Reset the database
+
+**Reset Database** deletes everything on this instance and starts it over, empty. You cannot undo it, so download a backup first.
+
+The button is hidden unless whoever runs your SyncBot deployment sets `ENABLE_DB_RESET=true`. Even then, it shows only on the primary Workspace's Home tab.
+
+## Move a Workspace
+
+Moving a Workspace to another SyncBot instance keeps its Groups, Syncs, and history. In the steps below, Workspace A moves from its previous SyncBot instance to this one. The previous instance does not go away. It keeps running its other Workspaces, and once step 5 connects the two instances, each one shows on the other's Home tab as an **External Connection**. In this example, that connection is named `Partner Org`.
+
+You do the work from **Data Migration**. Workspace A's Slack admins find it in the SyncBot Configuration section of the Home tab.
+
+For a while, Workspace A has SyncBot installed from both instances. The previous instance keeps syncing it until you uninstall that app in the last step. Then this instance takes over.
+
+### Steps
+
+1. **Update both instances to SyncBot 1.7.3 or newer.** Starting with 1.7.3, SyncBot imports only files exported from 1.7.3 or newer.
+2. **Keep the previous instance's SyncBot installed in Workspace A.** You need it to export, and you remove it in the last step.
+3. **Install SyncBot in Workspace A from this instance.** A Slack admin of Workspace A uses this instance's install link.
+4. **Turn on Federation** in **Settings** on both instances. A primary Workspace admin does this.
+5. **Connect the two instances.**
+   - A primary Workspace admin on one instance chooses **Create Connection** and shares the code.
+   - A primary Workspace admin on the other instance chooses **Join** and pastes the code.
+   - Each of them picks the Workspaces their side shares, and both lists include Workspace A.
+
+   The previous instance now shows on this instance's Home tab as the `Partner Org` External Connection. Wait a few minutes for the two instances to catch up with each other.
+6. **Export from the previous instance.** In Workspace A, open the previous instance's SyncBot app, go to **Data Migration**, and choose **Export**. SyncBot sends you the file in a DM.
+7. **Import here.** In Workspace A, open this instance's SyncBot app, go to **Data Migration**, and upload the file. Look over **Confirm Import**, then choose **Import**.
+8. **Uninstall the previous instance's SyncBot from Workspace A.** In Slack, remove that app from the Workspace with **Remove App**. One person's **Revoke** under Authorize does not do this. Workspace A's Syncs then start here on their own, with no second import.
+
+### Do this in this order
+
+- **Export before you uninstall.** Once the previous instance's SyncBot is gone from Workspace A, there is nothing left to export.
+- **Connect before you import.** This instance accepts only a file from itself or from an instance it is connected to. If you imported too early, connect, then import the same file.
+- **Uninstall last.** If you uninstall after exporting but before importing, the move still works. The Syncs just start right away, without the `Waiting for migration` stage, so you get no chance to check them first.
+
+### What Export puts in the file
+
+The file holds Workspace A's Groups, Syncs, and Channels, the message history that keeps threads and reactions connected, and its people and their mappings. For a private Channel, it can include the Channel and who added SyncBot to it, so treat the file as private.
+
+The file does not include:
+
+- Tokens or passwords, so it cannot be used to act as Workspace A.
+- Groups that were disbanded, or that Workspace A has left.
+
+Do not edit the file. SyncBot can tell where a file came from and whether it was changed, and it refuses one that was edited.
+
+### What Confirm Import shows
+
+- Where the file came from (here, the `Partner Org` External Connection).
+- Each Group in the file, with Workspace A's Channels in it, how many people are mapped, and how many messages are synced.
+- Anything that will be left out, and why.
+
+After you choose **Import**, SyncBot sends you the result in a DM. You can import the same file again later to pick up anything that was left out.
+
+### What you should see
+
+Right after the import, Workspace A's Syncs show `Waiting for migration`. They wait until you uninstall the previous instance's SyncBot from Workspace A, so the two instances never both post the same messages.
+
+Once you do, the Syncs start on their own:
+
+- SyncBot joins the public Channels and posts a short notice that they have resumed.
+- Private Channels stay paused, with a notice, until a manager who is in the Channel authorizes SyncBot and resumes it from the Home tab.
+- Workspace A keeps syncing with the Workspaces in its Groups that are still on the previous instance, through the `Partner Org` connection.
+
+If the file came from this same instance, for example to put back a Workspace you removed, the Syncs start right away. The exception is when another connected instance still has SyncBot installed in Workspace A.
+
+### When something is left out or refused
+
+- **The file was changed.** Export a fresh copy from the instance that made it.
+- **The file cannot be checked.** It usually came from a version before 1.7.3. Update that instance, export again, and import the new file.
+- **The file came from an instance this one is not connected to, or that External Connection is not active.** Connect the two instances (step 5), then import the same file.
+- **Federation is off.** A primary Workspace admin turns it on in **Settings**, then you import again.
+- **A Workspace in the file is not on this instance yet.** Its Channels are left out. Import the file again once it is here.
+- **A Group is already here without Workspace A.** Import does not add Workspace A to a Group it is not already in. Ask an Owner of that Group to invite Workspace A, then import again. Sharing Workspace A on both sides in step 5 usually prevents this.
+- **SyncBot could not reach the previous instance.** The Syncs keep waiting. Try the import again in a few minutes.
+- **The previous instance did not accept SyncBot's check.** Ask a primary Workspace admin to look at that External Connection, then import again.
+- **The previous instance has been shut down.** The move cannot finish, so Workspace A starts fresh on this instance.
+
+Import also follows these rules:
+
+- A Group that is new to this instance starts with just Workspace A. Its other members show up as the two instances catch up.
+- Other Workspaces on this instance are not touched.
+- People are matched up only when one is in Workspace A and the other is on a connected instance.
+
+## A Workspace that is still installed on both instances
+
+Between steps 3 and 8, managers of Workspaces that share a Group with Workspace A get one message saying SyncBot was installed from another instance. During a move, that is expected.
+
+If you leave an External Connection, the Workspaces on the other side are set aside, not deleted. They stay that way for the retention period in **Settings**, and reconnecting within that time brings them back with their history.
+
+For how this works under the hood, see [Architecture](ARCHITECTURE.md).
