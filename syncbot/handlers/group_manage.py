@@ -1056,6 +1056,7 @@ def handle_remove_group_member_confirm(
 ) -> None:
     """Soft-delete the member's Channel Syncs and hard-delete the membership."""
     from handlers._common import _close_modal_done, _parse_private_metadata
+    from handlers.group import _generate_invite_code
     from helpers.leave_sync import _replicate_one_remove, soft_delete_sync_channels
     from helpers.workspace_kind import is_stub_workspace
 
@@ -1111,6 +1112,7 @@ def handle_remove_group_member_confirm(
             if row.channel_id and row.channel_id not in removing:
                 removing.append(row.channel_id)
     hold = {(target.id, channel_id) for channel_id in removing}
+    helpers.replace_group_invite_code(group.id, _generate_invite_code)
     for channel_id in removing:
         soft_delete_sync_channels(
             target,
@@ -1137,9 +1139,6 @@ def handle_remove_group_member_confirm(
         schemas.WorkspaceGroupMember,
         [schemas.WorkspaceGroupMember.id == member.id],
     )
-    from handlers.group import _generate_invite_code
-
-    helpers.replace_group_invite_code(group.id, _generate_invite_code)
     try:
         from federation.replicate import replicate_group_member_remove
 

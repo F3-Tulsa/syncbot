@@ -476,7 +476,7 @@ def real_db(tmp_path):
             clear_all_caches()
 
 
-def test_remove_gives_the_group_a_new_invite_code(real_db):
+def _seed_group_with_two_members():
     import json
     from datetime import UTC, datetime
 
@@ -523,7 +523,11 @@ def test_remove_gives_the_group_a_new_invite_code(real_db):
         "team": {"id": "TA"},
         "view": {"private_metadata": json.dumps({"member_id": member.id}), "team_id": "TA"},
     }
-    with (
+    return actor, group, member, body
+
+
+def _remove_patches(actor):
+    return (
         patch("handlers.group_manage.helpers.is_workspace_manager", return_value=True),
         patch("handlers.group_manage.helpers.get_workspace_record", return_value=actor),
         patch("handlers.group_manage.helpers.is_workspace_owner", return_value=True),
@@ -533,8 +537,52 @@ def test_remove_gives_the_group_a_new_invite_code(real_db):
         patch("federation.replicate.replicate_group_member_remove"),
         patch("handlers.group_manage.builders.refresh_home_tab_for_workspace"),
         patch("handlers._common._close_modal_done"),
-    ):
+    )
+
+
+def test_remove_gives_the_group_a_new_invite_code(real_db):
+    from contextlib import ExitStack
+
+    from db import DbManager, schemas
+
+    actor, group, _member, body = _seed_group_with_two_members()
+    with ExitStack() as stack:
+        for patcher in _remove_patches(actor):
+            stack.enter_context(patcher)
         handle_remove_group_member_confirm(body, MagicMock(), MagicMock(), {})
     refreshed = DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.id == group.id])[0]
     assert refreshed.invite_code != "OLD-CODE"
     assert DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.invite_code == "OLD-CODE"]) == []
+
+
+def test_remove_changes_the_invite_code_first(real_db):
+    from db import DbManager, schemas
+
+    actor, group, member, body = _seed_group_with_two_members()
+    with (
+        patch("handlers.group_manage.helpers.is_workspace_manager", return_value=True),
+        patch("handlers.group_manage.helpers.get_workspace_record", return_value=actor),
+        patch("handlers.group_manage.helpers.is_workspace_owner", return_value=True),
+        patch("handlers.group_manage.helpers.format_admin_label", return_value="Ada Lovelace"),
+        patch(
+            "handlers.group_manage.helpers.resolve_workspace_name",
+            side_effect=lambda ws: ws.workspace_name,
+        ),
+        patch("helpers.notifications.notify_group_managers", return_value=[]),
+        patch("federation.replicate.replicate_group_member_remove") as replicate,
+        patch("handlers.group_manage.builders.refresh_home_tab_for_workspace"),
+        patch("handlers._common._close_modal_done"),
+        patch("handlers.group_manage.helpers.replace_group_invite_code", side_effect=RuntimeError),
+        pytest.raises(RuntimeError),
+    ):
+        handle_remove_group_member_confirm(body, MagicMock(), MagicMock(), {})
+    kept = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [
+            schemas.WorkspaceGroupMember.group_id == group.id,
+            schemas.WorkspaceGroupMember.workspace_id == member.workspace_id,
+        ],
+    )
+    assert kept
+    assert kept[0].id == member.id
+    replicate.assert_not_called()

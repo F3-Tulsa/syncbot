@@ -1736,6 +1736,7 @@ def handle_group_member_remove(body: dict, fed_ws: schemas.Instance) -> tuple[in
     ws = _workspace_for_replicated_team(fed_ws, team_id, create_stub=False)
     if not ws:
         return 200, {"ok": True}
+    helpers.replace_group_invite_code(groups[0].id, lambda: "FED-" + secrets.token_hex(4).upper())
     _post_carried_group_notice(groups[0].id, body)
     DbManager.delete_records(
         schemas.UserMapping,
@@ -1751,7 +1752,6 @@ def handle_group_member_remove(body: dict, fed_ws: schemas.Instance) -> tuple[in
             schemas.WorkspaceGroupMember.workspace_id == ws.id,
         ],
     )
-    helpers.replace_group_invite_code(groups[0].id, lambda: "FED-" + secrets.token_hex(4).upper())
     _invalidate_replicated_group_homes(groups[0].id)
     return 200, {"ok": True}
 

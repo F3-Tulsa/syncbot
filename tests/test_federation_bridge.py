@@ -1009,6 +1009,31 @@ def test_group_leave_and_remove_notify_local_managers(real_db):
     )
 
 
+def test_member_remove_changes_the_invite_code_first(real_db):
+    from db import DbManager, schemas
+    from federation.api import handle_group_member_remove
+
+    peer = _seed_peer()
+    with (
+        patch("federation.api.helpers.replace_group_invite_code", side_effect=RuntimeError),
+        patch("helpers.notifications.notify_admins_dm") as dm,
+        pytest.raises(RuntimeError),
+    ):
+        handle_group_member_remove(
+            {"uid": peer["group"].uid, "team_id": "TSTUB", "notice": ":wave: removed `Stub` from `Shared`."},
+            peer["fed"],
+        )
+    kept = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [
+            schemas.WorkspaceGroupMember.group_id == peer["group"].id,
+            schemas.WorkspaceGroupMember.workspace_id == peer["stub"].id,
+        ],
+    )
+    assert kept
+    dm.assert_not_called()
+
+
 def test_replicate_role_and_disband_payloads(real_db):
     from db import DbManager, schemas
     from federation.replicate import replicate_group_invite, replicate_group_leave, replicate_group_upsert
