@@ -286,10 +286,10 @@ class TestDataMigrationImportConnect:
         payload = {
             "version": 1,
             "workspace": {"team_id": "T1"},
-            "groups": [{"uid": "g1", "name": "Workspace Group", "role": "member"}],
+            "groups": [{"uid": "g1", "name": "Live Group", "role": "member"}],
             "syncs": [{"uid": "s1", "group_uid": "g1", "title": "Announcements"}],
-            "sync_channels": [{"sync_uid": "s1", "channel_id": "C1"}],
-            "user_mappings": [{"source_user_id": "U1"}],
+            "sync_channels": [{"sync_uid": "s1", "team_id": "T1", "channel_id": "C1", "channel_name": "general"}],
+            "user_mappings": [{"source_user_id": "U1", "group_uid": "g1"}],
             "post_meta": {"s1:C1": [{"kind": "message", "post_id": "p1"}]},
             "source_instance": {
                 "webhook_url": "https://ws-a.example/api/federation",
@@ -337,12 +337,11 @@ class TestDataMigrationImportConnect:
         text = str(view)
         assert "Partner Org" not in text
         assert "connection code" not in text
-        assert "Workspace Group" in text
-        assert "`1` Sync (`Announcements`)" in text
-        assert "`1` Channel" in text
-        assert "`1` message" in text
-        assert "`1` person is mapped between Workspaces." in text
-        assert text.count("person is mapped") == 1
+        assert "*File contents*" in text
+        assert "Group Name: Live Group" in text
+        assert "Synced Channels: 1 (#general)" in text
+        assert "Mapped Users: 1" in text
+        assert "Synced Messages: 1" in text
 
     def test_review_names_a_workspace_that_is_not_here(self):
         from types import SimpleNamespace
@@ -400,7 +399,7 @@ class TestDataMigrationImportConnect:
         assert "will not come over" in text
         assert "Workspace C" not in text
         assert "connection code" not in text
-        assert "exported from this instance" in text
+        assert "exported from this Workspace on this SyncBot instance" in text
         assert "start right away" in text
         assert not any(block.get("type") == "input" for block in resp["view"]["blocks"])
 
@@ -543,7 +542,8 @@ class TestDataMigrationImportConnect:
         ):
             resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
         text = str(resp["view"])
-        assert "This file was exported from this instance." in text
+        assert "This file was exported from this Workspace on this SyncBot instance." in text
+        assert "Importing adds these Groups and Syncs back to this Workspace" in text
         assert "they start right away" in text
         assert not any(block.get("type") == "input" for block in resp["view"]["blocks"])
 
@@ -599,7 +599,42 @@ class TestDataMigrationImportConnect:
         assert "`Partner Org`" in message
         assert "Waiting for migration" in message
 
-    def test_connected_review_says_syncs_start_once_nobody_still_has_the_workspace(self):
+    def test_finished_dm_says_where_syncbot_is_uninstalled(self):
+        from types import SimpleNamespace
+
+        from handlers.export_import import _import_finished_text
+
+        workspace = SimpleNamespace(id=None, team_id="T1")
+        peer = SimpleNamespace(instance_id="e" * 64, name="Partner Org")
+        waiting = _import_finished_text(
+            {},
+            workspace,
+            "waiting_for_uninstall",
+            peer,
+            source_name="Partner Org",
+            source_kind="connected",
+            has_pending=True,
+        )
+        assert waiting == (
+            ":white_check_mark: Import finished. This Workspace's Syncs show `Waiting for migration` "
+            "until SyncBot is uninstalled from this Workspace on `Partner Org`. They start on their own after that. "
+            "If they do not, import this file again."
+        )
+        running = _import_finished_text(
+            {},
+            workspace,
+            "resumed",
+            None,
+            source_name="Partner Org",
+            source_kind="connected",
+            has_pending=False,
+        )
+        assert running == (
+            ":white_check_mark: Import finished. SyncBot is already uninstalled from this Workspace "
+            "on `Partner Org`, so its Syncs are running."
+        )
+
+    def test_connected_review_says_syncs_start_once_syncbot_is_uninstalled_there(self):
         from types import SimpleNamespace
 
         from handlers.export_import import handle_data_migration_submit_ack
@@ -635,9 +670,10 @@ class TestDataMigrationImportConnect:
         ):
             resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
         text = str(resp["view"])
-        assert "This file is from `Partner Org`, a connected SyncBot instance." in text
-        assert "Syncs start once `Partner Org` no longer has SyncBot in this Workspace." in text
-        assert "If it is already removed there, they start right away." in text
+        assert "This file was exported from this Workspace on `Partner Org`, a connected SyncBot instance." in text
+        assert "including the other `Partner Org` Workspaces in those Groups" in text
+        assert "Until SyncBot is uninstalled from this Workspace on `Partner Org`" in text
+        assert "If it is already uninstalled there, they start right away." in text
         assert not any(block.get("type") == "input" for block in resp["view"]["blocks"])
 
     def test_finished_dm_covers_running_waiting_unreachable_and_what_was_left_out(self):

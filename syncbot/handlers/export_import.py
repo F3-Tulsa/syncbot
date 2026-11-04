@@ -11,7 +11,7 @@ import builders
 import constants
 import helpers
 from db import DbManager, schemas
-from handlers._common import _close_modal_done, _counted, _update_wait_modal, _wait_modal_ack
+from handlers._common import _close_modal_done, _update_wait_modal, _wait_modal_ack
 from helpers import export_import as ei
 from helpers.workspace import invalidate_fed_ws_for_sync_cache
 from logger import log_error, log_warning
@@ -668,7 +668,12 @@ def _migration_message_count(post_meta: dict, sync_uid: str, channel_id: str) ->
 
 
 def _migration_overview_blocks(data: dict) -> list:
-    """Plain-language Group, Sync, Channel, and mapping counts from the file."""
+    """*File contents*, then one code block per Group with Home's labels.
+
+    Synced Channels are this Workspace's own Channels in that Group's Syncs.
+    Mapped Users are the file's mappings for that Group. Synced Messages count
+    every Channel in those Syncs.
+    """
     from slack.blocks import section
 
     groups = [item for item in (data.get("groups") or []) if isinstance(item, dict)]
@@ -676,44 +681,43 @@ def _migration_overview_blocks(data: dict) -> list:
     channels = [item for item in (data.get("sync_channels") or []) if isinstance(item, dict)]
     mappings = [item for item in (data.get("user_mappings") or []) if isinstance(item, dict)]
     post_meta = data.get("post_meta") if isinstance(data.get("post_meta"), dict) else {}
+    workspace = data.get("workspace") if isinstance(data.get("workspace"), dict) else {}
+    this_team_id = str(workspace.get("team_id") or "")
     channels_by_sync: dict[str, list] = {}
     for channel in channels:
         uid = str(channel.get("sync_uid") or "")
         if uid:
             channels_by_sync.setdefault(uid, []).append(channel)
-    blocks = [section("*What is in this file*")]
     if not groups:
-        blocks.append(section("No Groups."))
+        return [section("This file has no Groups.")]
+    blocks = [section("*File contents*")]
     for group in groups:
         uid = str(group.get("uid") or "")
         name = str(group.get("name") or "Unnamed group").strip() or "Unnamed group"
-        group_syncs = [item for item in syncs if str(item.get("group_uid") or "") == uid]
-        if not group_syncs:
-            blocks.append(section(f"• `{name}`: no Syncs"))
-            continue
-        titles = [str(item.get("title") or "").strip() for item in group_syncs if str(item.get("title") or "").strip()]
-        channel_count = 0
+        own_channels: list[str] = []
         message_count = 0
-        for sync in group_syncs:
+        for sync in syncs:
+            if str(sync.get("group_uid") or "") != uid:
+                continue
             sync_uid = str(sync.get("uid") or "")
-            sync_channels = channels_by_sync.get(sync_uid, [])
-            channel_count += len(sync_channels)
-            for channel in sync_channels:
-                message_count += _migration_message_count(post_meta, sync_uid, str(channel.get("channel_id") or ""))
-        title_line = ""
-        if titles:
-            title_line = " (" + ", ".join(f"`{title}`" for title in titles) + ")"
-        blocks.append(
-            section(
-                f"• `{name}`: {_counted(len(group_syncs), 'Sync', 'Syncs')}{title_line}, "
-                f"{_counted(channel_count, 'Channel', 'Channels')}, "
-                f"{_counted(message_count, 'message', 'messages')}"
-            )
-        )
-    mapped_count = len(mappings)
-    if mapped_count:
-        verb = "is" if mapped_count == 1 else "are"
-        blocks.append(section(f"{_counted(mapped_count, 'person', 'people')} {verb} mapped between Workspaces."))
+            for channel in channels_by_sync.get(sync_uid, []):
+                channel_id = str(channel.get("channel_id") or "")
+                message_count += _migration_message_count(post_meta, sync_uid, channel_id)
+                if str(channel.get("team_id") or "") == this_team_id:
+                    channel_name = str(channel.get("channel_name") or "").strip().removeprefix("#")
+                    own_channels.append(f"#{channel_name or channel_id}")
+        channel_line = f"Synced Channels: {len(own_channels)}"
+        if own_channels:
+            channel_line += f" ({', '.join(own_channels)})"
+        mapped_count = sum(1 for item in mappings if str(item.get("group_uid") or "") == uid)
+        lines = [
+            f"Group Name: {name}",
+            channel_line,
+            f"Mapped Users: {mapped_count}",
+            f"Synced Messages: {message_count}",
+        ]
+        text = "\n".join(lines).replace("`", "'")
+        blocks.append(section(f"```{text}```"))
     return blocks
 
 
@@ -888,7 +892,7 @@ def _import_finished_text(
     if has_pending and result == "waiting_for_uninstall":
         text = (
             ":white_check_mark: Import finished. This Workspace's Syncs show `Waiting for migration` "
-            f"until `{peer_name}` removes SyncBot from this Workspace. They start on their own after that. "
+            f"until SyncBot is uninstalled from this Workspace on `{peer_name}`. They start on their own after that. "
             "If they do not, import this file again."
         )
     elif has_pending and result == "unreachable":
@@ -906,8 +910,8 @@ def _import_finished_text(
         )
     elif result == "resumed" and source_kind == "connected":
         text = (
-            f":white_check_mark: Import finished. `{source_name}` no longer has this Workspace, "
-            "so its Syncs are running."
+            f":white_check_mark: Import finished. SyncBot is already uninstalled from this Workspace "
+            f"on `{source_name}`, so its Syncs are running."
         )
     else:
         text = ":white_check_mark: Import finished. This Workspace's Syncs are running."
@@ -963,9 +967,14 @@ def handle_data_migration_submit_ack(
 
     blocks = []
     if kind == "connected":
-        blocks.append(section(f":package: This file is from `{source_name}`, a connected SyncBot instance."))
+        blocks.append(
+            section(
+                f":package: This file was exported from this Workspace on `{source_name}`, "
+                "a connected SyncBot instance."
+            )
+        )
     else:
-        blocks.append(section(":package: This file was exported from this instance."))
+        blocks.append(section(":package: This file was exported from this Workspace on this SyncBot instance."))
     blocks.extend(_migration_overview_blocks(data))
     missing = _migration_workspace_names_not_here(data, workspace_record.team_id)
     if missing:
@@ -976,15 +985,17 @@ def handle_data_migration_submit_ack(
     if kind == "connected":
         blocks.append(
             section(
-                f"Import brings over this Workspace and `{source_name}`'s Workspaces. "
-                f"Syncs start once `{source_name}` no longer has SyncBot in this Workspace. "
-                "If it is already removed there, they start right away."
+                f"Importing brings over this Workspace's Groups and Syncs from `{source_name}`, "
+                f"including the other `{source_name}` Workspaces in those Groups. "
+                f"Until SyncBot is uninstalled from this Workspace on `{source_name}`, "
+                "these Syncs show `Waiting for migration`. "
+                "If it is already uninstalled there, they start right away."
             )
         )
     else:
         blocks.append(
             section(
-                "Import adds these Groups and Syncs back to this Workspace, and they start right away, "
+                "Importing adds these Groups and Syncs back to this Workspace, and they start right away, "
                 "unless another connected instance still has SyncBot in this Workspace."
             )
         )
