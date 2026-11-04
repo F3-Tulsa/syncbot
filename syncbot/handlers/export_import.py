@@ -810,21 +810,6 @@ def _migration_groups_not_joined(data: dict, workspace_id: int) -> list[str]:
     return names
 
 
-def _left_out_groups_text(names: list[str]) -> str:
-    label = _format_workspace_names(names)
-    if len(names) == 1:
-        return (
-            f":warning: {label} is already on this install, and this Workspace is not in it, "
-            "so Import leaves it out. Ask an Owner of that Group to invite this Workspace, "
-            "then import this file again."
-        )
-    return (
-        f":warning: {label} are already on this install, and this Workspace is not in them, "
-        "so Import leaves them out. Ask an Owner of each Group to invite this Workspace, "
-        "then import this file again."
-    )
-
-
 def _format_workspace_names(names: list[str]) -> str:
     ticked = [f"`{name}`" for name in names]
     if len(ticked) == 1:
@@ -834,117 +819,120 @@ def _format_workspace_names(names: list[str]) -> str:
     return ", ".join(ticked[:-1]) + f", and {ticked[-1]}"
 
 
-def _import_connect_instruction() -> str:
-    turn_on = ""
-    if not helpers.federation_enabled():
-        turn_on = "turns Federation on in Settings, then "
-    return (
-        f"A primary Workspace admin {turn_on}uses Create Connection, the other install uses Join, "
-        "and then this file is imported again."
-    )
-
-
-def _missing_channels_clause(names: list[str]) -> str:
+def _missing_workspaces_text(names: list[str], *, finished: bool = False) -> str:
     label = _format_workspace_names(names)
-    verb = "is" if len(names) == 1 else "are"
-    channels = "its Channels" if len(names) == 1 else "their Channels"
-    return f"{label} {verb} not on this install, so {channels} were not imported."
-
-
-def _import_missing_workspace_text(names: list[str], *, finished: bool) -> str:
-    clause = _missing_channels_clause(names)
-    connect = _import_connect_instruction()
-    if finished:
-        return f":white_check_mark: Import finished. :warning: {clause} {connect}"
-    return (
-        f":warning: {_format_workspace_names(names)} "
-        f"{'is' if len(names) == 1 else 'are'} not on this install. "
-        "Import keeps this Workspace's Groups and Syncs and leaves out "
-        f"{'its Channels' if len(names) == 1 else 'their Channels'}. {connect}"
-    )
-
-
-_IMPORT_FINISH_HELP = (
-    "How should this import finish?\n"
-    "*Wait for the other install.* This Workspace's Syncs stay `Waiting for migration` "
-    "until an External Connection that includes this Workspace exists and the old instance uninstalls SyncBot.\n"
-    "*Finish on this install.* This Workspace is not still installed on another SyncBot, "
-    "so the Syncs resume now."
-)
-
-
-def _migration_finish_block() -> orm.InputBlock:
-    initial = "wait" if helpers.federation_enabled() else "finish"
-    return orm.InputBlock(
-        label="How this import finishes",
-        action=actions.CONFIG_DATA_MIGRATION_FINISH,
-        optional=False,
-        element=orm.RadioButtonsElement(
-            initial_value=initial,
-            options=[
-                orm.SelectorOption(name="Wait for the other install", value="wait"),
-                orm.SelectorOption(name="Finish on this install", value="finish"),
-            ],
-        ),
-    )
-
-
-def _migration_finish_choice(body: dict) -> str | None:
-    value = helpers.safe_get(
-        body,
-        "view",
-        "state",
-        "values",
-        actions.CONFIG_DATA_MIGRATION_FINISH,
-        actions.CONFIG_DATA_MIGRATION_FINISH,
-        "selected_option",
-        "value",
-    )
-    if value in ("wait", "finish"):
-        return value
-    return None
-
-
-def _import_finished_text(data: dict, workspace, release: str, *, finish_here: bool) -> str:
-    missing = _migration_workspace_names_not_here(data, getattr(workspace, "team_id", "") or "")
-    if release == "waiting_for_connection":
-        held = (
-            ":white_check_mark: Import finished. :warning: This install has no External Connection, "
-            "so this Workspace stays `Waiting for migration`."
-        )
-        turn_on = "" if helpers.federation_enabled() else "turns Federation on in Settings, then "
-        follow = (
-            f"A primary Workspace admin {turn_on}connects the two installs with Create Connection and Join, "
-            "and picks this Workspace for that connection."
-        )
-        if missing:
+    if len(names) == 1:
+        if finished:
             return (
-                f"{held} {_missing_channels_clause(missing)} {follow} Then import this file again. "
-                "The Syncs resume after the old instance uninstalls SyncBot."
+                f":warning: {label} isn't on this install yet, so its Channels were left out. "
+                "Import this file again once it's here."
             )
-        return f"{held} {follow} The Syncs resume after the old instance uninstalls SyncBot."
-    if release == "waiting_for_uninstall":
-        text = (
-            ":white_check_mark: Import finished. :warning: The other install still has this Workspace, "
-            "so these Syncs stay `Waiting for migration` until that install uninstalls SyncBot."
+        return (
+            f":warning: {label} isn't on this install yet, so its Channels won't come over. "
+            "Import this file again once it's here."
         )
-        if missing:
-            where = "that Workspace" if len(missing) == 1 else "those Workspaces"
-            text += (
-                f" :warning: {_missing_channels_clause(missing)} "
-                f"Import this file again after {where} is on this install."
-            )
-        return text
-    if finish_here:
-        if missing:
-            return _import_missing_workspace_text(missing, finished=True)
-        return ":white_check_mark: Import finished."
-    text = (
-        ":white_check_mark: Import finished. The old instance already uninstalled SyncBot, so these Syncs are active."
+    if finished:
+        return (
+            f":warning: {label} aren't on this install yet, so their Channels were left out. "
+            "Import this file again once they're here."
+        )
+    return (
+        f":warning: {label} aren't on this install yet, so their Channels won't come over. "
+        "Import this file again once they're here."
     )
+
+
+def _left_out_groups_text(names: list[str], *, finished: bool = False) -> str:
+    label = _format_workspace_names(names)
+    if len(names) == 1:
+        owner = f"`{names[0]}`"
+        if finished:
+            return (
+                f":warning: {label} is already on this install, but this Workspace isn't in it, "
+                f"so it was left out. Ask an Owner of {owner} to invite this Workspace, then import again."
+            )
+        return (
+            f":warning: {label} is already on this install, but this Workspace isn't in it. "
+            f"Ask an Owner of {owner} to invite this Workspace, then import again."
+        )
+    if finished:
+        return (
+            f":warning: {label} are already on this install, but this Workspace isn't in them, "
+            "so they were left out. Ask an Owner of each to invite this Workspace, then import again."
+        )
+    return (
+        f":warning: {label} are already on this install, but this Workspace isn't in them. "
+        "Ask an Owner of each to invite this Workspace, then import again."
+    )
+
+
+def _workspace_has_pending_channels(workspace_id: int) -> bool:
+    rows = DbManager.find_records(
+        schemas.SyncChannel,
+        [
+            schemas.SyncChannel.workspace_id == workspace_id,
+            schemas.SyncChannel.deleted_at.is_(None),
+            schemas.SyncChannel.status == "pending",
+        ],
+    )
+    return bool(rows)
+
+
+def _import_finished_text(
+    data: dict,
+    workspace,
+    result: str,
+    peer,
+    *,
+    source_name: str,
+    source_kind: str,
+    has_pending: bool,
+) -> str:
+    peer_name = source_name
+    if peer is not None:
+        peer_name = ei.migration_source_name(getattr(peer, "instance_id", "") or "", peer)
+    running_here = ":white_check_mark: Import finished. This Workspace's Syncs are running."
+    running_connected = (
+        f":white_check_mark: Import finished. `{source_name}` no longer has this Workspace, "
+        "so its Syncs are running."
+    )
+    if not has_pending:
+        if result == "resumed" and source_kind == "connected":
+            text = running_connected
+        else:
+            text = running_here
+        if result == "waiting_for_uninstall":
+            text += f" `{peer_name}` still has this Workspace."
+        elif result == "unreachable":
+            text += (
+                f" SyncBot couldn't reach `{peer_name}` to check. "
+                "If a move is still in progress, try the import again in a few minutes."
+            )
+    elif result == "waiting_for_uninstall":
+        text = (
+            ":white_check_mark: Import finished. This Workspace's Syncs show `Waiting for migration` "
+            f"until `{peer_name}` removes SyncBot from this Workspace. They start on their own after that. "
+            "If they don't, import this file again."
+        )
+    elif result == "unreachable":
+        text = (
+            ":warning: Import couldn't finish. "
+            f"SyncBot couldn't reach `{peer_name}` to check whether it still has this Workspace, "
+            "so its Syncs show `Waiting for migration`. Try the import again in a few minutes."
+        )
+    elif source_kind == "connected":
+        text = running_connected
+    else:
+        text = running_here
+    team_id = getattr(workspace, "team_id", "") or ""
+    workspace_id = getattr(workspace, "id", None)
+    missing = _migration_workspace_names_not_here(data, team_id)
     if missing:
-        warning = _import_missing_workspace_text(missing, finished=True).split(":warning: ", 1)[1]
-        text += f" :warning: {warning}"
+        text += " " + _missing_workspaces_text(missing, finished=True)
+    if workspace_id is not None:
+        left_out = _migration_groups_not_joined(data, workspace_id)
+        if left_out:
+            text += " " + _left_out_groups_text(left_out, finished=True)
     return text
 
 
@@ -988,16 +976,34 @@ def handle_data_migration_submit_ack(
     )
     from slack.blocks import section
 
+    source_name = ei.migration_source_name(instance_id, signer)
     blocks = []
+    if kind == "connected":
+        blocks.append(section(f":package: This file is from `{source_name}`, a connected SyncBot install."))
+    else:
+        blocks.append(section(":package: This file was exported from this install."))
+    blocks.extend(_migration_overview_blocks(data))
     missing = _migration_workspace_names_not_here(data, workspace_record.team_id)
     if missing:
-        blocks.append(section(_import_missing_workspace_text(missing, finished=False)))
+        blocks.append(section(_missing_workspaces_text(missing)))
     left_out = _migration_groups_not_joined(data, workspace_record.id)
     if left_out:
         blocks.append(section(_left_out_groups_text(left_out)))
-    blocks.append(section(_IMPORT_FINISH_HELP))
-    blocks.append(_migration_finish_block())
-    blocks.extend(_migration_overview_blocks(data))
+    if kind == "connected":
+        blocks.append(
+            section(
+                f"Import brings over this Workspace and `{source_name}`'s Workspaces. "
+                "Syncs start once no connected install still has SyncBot in this Workspace. "
+                "If that's already true, they start right away."
+            )
+        )
+    else:
+        blocks.append(
+            section(
+                "Import adds these Groups and Syncs back to this Workspace, and they start right away, "
+                "unless another connected install still has SyncBot in this Workspace."
+            )
+        )
     review = orm.BlockView(blocks=blocks)
     return {
         "response_action": "update",
@@ -1063,11 +1069,6 @@ def _migration_stopped_text(kind: str, name: str) -> str:
 
 def handle_data_migration_review_ack(body: dict, client: WebClient, context: dict) -> dict | None:
     """Keep the modal open while import runs."""
-    if _migration_finish_choice(body) is None:
-        return {
-            "response_action": "errors",
-            "errors": {actions.CONFIG_DATA_MIGRATION_FINISH: "Choose how to finish this import."},
-        }
     return _wait_modal_ack(
         title="Confirm Import",
         callback_id=actions.CONFIG_DATA_MIGRATION_REVIEW,
@@ -1080,6 +1081,21 @@ def _notify_import_result(client: WebClient, body: dict, user_id: str | None, me
     _close_modal_done(client, body, message)
 
 
+def _narrow_import_map(team_id_to_workspace_id: dict, workspace_record, signer) -> dict:
+    """Keep this Workspace and stubs that belong to the install that signed the file."""
+    signer_id = getattr(signer, "instance_id", None)
+    this_team = getattr(workspace_record, "team_id", None)
+    narrowed = {}
+    for team, ws_id in team_id_to_workspace_id.items():
+        if team == this_team:
+            narrowed[team] = ws_id
+            continue
+        other = helpers.get_workspace_by_id(ws_id)
+        if other is not None and getattr(other, "instance_id", None) == signer_id:
+            narrowed[team] = ws_id
+    return narrowed
+
+
 def _complete_data_migration_import(
     body: dict,
     client: WebClient,
@@ -1087,7 +1103,6 @@ def _complete_data_migration_import(
     context: dict,
     *,
     user_id: str | None,
-    finish_here: bool,
 ) -> None:
     if not user_id:
         return
@@ -1119,6 +1134,13 @@ def _complete_data_migration_import(
             name = meta.get("source_name") or ei.migration_source_name(instance_id, None)
         _notify_import_result(client, body, user_id, _migration_stopped_text(kind, name))
         return
+    if kind == "connected":
+        team_id_to_workspace_id = _narrow_import_map(team_id_to_workspace_id, workspace_record, signer)
+    source_name = (
+        ei.migration_source_name(getattr(signer, "instance_id", "") or "", signer)
+        if signer is not None
+        else (meta.get("source_name") or "Connection")
+    )
     try:
         _run_migration_import(
             data,
@@ -1129,9 +1151,9 @@ def _complete_data_migration_import(
             acting_user_id=user_id,
             context=context,
         )
-        release = "resumed"
+        result, peer = "resumed", None
         if getattr(workspace_record, "team_id", None):
-            release = helpers.consider_migration_release(workspace_record.team_id, finish_here=finish_here)
+            result, peer = helpers.consider_migration_release(workspace_record.team_id)
         builders.refresh_home_tab_for_workspace(
             workspace_record,
             logger,
@@ -1146,7 +1168,15 @@ def _complete_data_migration_import(
         client,
         body,
         user_id,
-        _import_finished_text(data, workspace_record, release, finish_here=finish_here),
+        _import_finished_text(
+            data,
+            workspace_record,
+            result,
+            peer,
+            source_name=source_name,
+            source_kind=kind,
+            has_pending=_workspace_has_pending_channels(workspace_record.id),
+        ),
     )
 
 
@@ -1166,5 +1196,4 @@ def handle_data_migration_review(
         logger,
         context,
         user_id=user_id,
-        finish_here=_migration_finish_choice(body) == "finish",
     )

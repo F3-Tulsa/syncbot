@@ -263,9 +263,6 @@ CONFIG_DATA_MIGRATION_SUBMIT = "data_migration_submit"
 CONFIG_DATA_MIGRATION_REVIEW = "data_migration_review"
 """Callback: Data Migration review modal submitted."""
 
-CONFIG_DATA_MIGRATION_FINISH = "data_migration_finish"
-"""Input: Confirm Import radio, ``wait`` or ``finish``."""
-
 CONFIG_DATA_MIGRATION_EXPORT = "data_migration_export"
 """Action: user clicked Export in Data Migration modal."""
 

@@ -1300,3 +1300,97 @@ def test_finish_imports_nothing_when_the_signer_is_no_longer_trusted(real_db):
     run_import.assert_not_called()
     assert "no longer connected" in dm.call_args.args[2]
     assert "`Partner Org`" in dm.call_args.args[2]
+
+
+def test_connected_import_writes_only_that_installs_stubs(real_db):
+    from datetime import UTC, datetime
+
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+    from handlers.export_import import _narrow_import_map
+    from helpers.export_import import import_migration_data
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    workspace_a = DbManager.create_record(
+        schemas.Workspace(team_id="TA", workspace_name="Workspace A", instance_id=get_instance_id())
+    )
+    partner = DbManager.create_record(
+        schemas.Instance(
+            instance_id="b" * 64,
+            public_key="pem",
+            status="active",
+            trust_status="trusted",
+            name="Partner Org",
+            created_at=now,
+        )
+    )
+    other = DbManager.create_record(
+        schemas.Instance(
+            instance_id="c" * 64,
+            public_key="pem-other",
+            status="active",
+            trust_status="trusted",
+            name="Other Org",
+            created_at=now,
+        )
+    )
+    partner_stub = DbManager.create_record(
+        schemas.Workspace(team_id="TC", workspace_name="Workspace C", instance_id=partner.instance_id)
+    )
+    other_stub = DbManager.create_record(
+        schemas.Workspace(team_id="TD", workspace_name="Workspace D", instance_id=other.instance_id)
+    )
+    group = DbManager.create_record(
+        schemas.WorkspaceGroup(
+            name="A Group",
+            invite_code="AGRP-0002",
+            status="active",
+            created_at=now,
+            uid="a-group",
+        )
+    )
+    DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=workspace_a.id,
+            status="active",
+            role="owner",
+            joined_at=now,
+        )
+    )
+    narrowed = _narrow_import_map(
+        {"TA": workspace_a.id, "TC": partner_stub.id, "TD": other_stub.id},
+        workspace_a,
+        partner,
+    )
+    assert set(narrowed) == {"TA", "TC"}
+    import_migration_data(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [
+                {
+                    "uid": "a-group",
+                    "name": "A Group",
+                    "role": "owner",
+                    "member_workspaces": [
+                        {"team_id": "TC", "role": "member"},
+                        {"team_id": "TD", "role": "member"},
+                    ],
+                }
+            ],
+            "syncs": [{"uid": "a-sync", "group_uid": "a-group", "title": "A Sync"}],
+            "sync_channels": [
+                {"sync_uid": "a-sync", "team_id": "TC", "channel_id": "CPART"},
+                {"sync_uid": "a-sync", "team_id": "TD", "channel_id": "COTHER"},
+            ],
+        },
+        workspace_a.id,
+        team_id_to_workspace_id=narrowed,
+    )
+    members = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [schemas.WorkspaceGroupMember.group_id == group.id, schemas.WorkspaceGroupMember.deleted_at.is_(None)],
+    )
+    assert {row.workspace_id for row in members} == {workspace_a.id, partner_stub.id}
+    assert DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.channel_id == "CPART"])
+    assert DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.channel_id == "COTHER"]) == []
