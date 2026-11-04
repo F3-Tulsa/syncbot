@@ -1270,7 +1270,7 @@ def test_connected_file_is_named_from_the_saved_connection(real_db):
         {schemas.Instance.name: None, schemas.Instance.primary_workspace_name: "Workspace A"},
     )
     blank = DbManager.get_record(schemas.Instance, id=instance_id)
-    assert migration_source_name(instance_id, blank) == "Workspace A"
+    assert migration_source_name(instance_id, blank) == f"Connection {instance_id[:8]}"
 
 
 def test_import_refuses_a_peer_that_is_not_an_active_connection(real_db):

@@ -615,12 +615,10 @@ def verify_migration_signature(data: dict) -> bool:
 
 
 def migration_source_name(instance_id: str, row=None) -> str:
-    """Name a signer from this install's ``instances`` row, never from the file."""
-    if row is not None:
-        for attr in ("name", "primary_workspace_name"):
-            value = getattr(row, attr, None)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+    """Name a signer by its connection name, never from the file."""
+    name = getattr(row, "name", None) if row is not None else None
+    if isinstance(name, str) and name.strip():
+        return name.strip()
     prefix = (instance_id or "").strip()[:8]
     return f"Connection {prefix}" if prefix else "Connection"
 
