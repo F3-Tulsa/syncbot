@@ -89,15 +89,17 @@ def _home_tab_content_hash(
     and External Connection fingerprint); ``is_admin`` and ``extra_manager_ids`` bust
     the cache when Settings visibility changes. ``private_channel_ids`` is this
     manager's sorted private Channel ids, ``()`` when Slack said there are none,
-    or ``None`` when private syncing is off or the set was not loaded. This
-    function does not call Slack.
+    or ``None`` when private syncing is off or the set was not loaded. Whether
+    an install link is known is hashed, so a Home built before this process saw
+    a Slack request is rebuilt on the next open. This function does not call Slack.
     """
     workspace_id = workspace_record.id
     workspace_name = (workspace_record.workspace_name or "") or ""
     permission_lists = tuple(helpers.user_permission_lists(workspace_record.team_id, user_id)) if user_id else ((), ())
     role_sig = (is_manager, is_admin, extra_manager_ids)
+    install_url_known = helpers.authorize_url(workspace_record.team_id) is not None
     if not is_manager:
-        payload = (workspace_id, workspace_name, user_id or "", permission_lists, role_sig)
+        payload = (workspace_id, workspace_name, user_id or "", permission_lists, role_sig, install_url_known)
         return hashlib.sha256(repr(payload).encode()).hexdigest()
 
     reset_visible = helpers.is_db_reset_visible_for_workspace(workspace_record.team_id)
@@ -183,6 +185,7 @@ def _home_tab_content_hash(
         user_id or "",
         permission_lists,
         role_sig,
+        install_url_known,
         _federation_home_fingerprint(),
         None if private_channel_ids is None else tuple(sorted(private_channel_ids)),
         bool(helpers.allow_private_channels(workspace_record.team_id)),

@@ -969,6 +969,8 @@ def test_group_leave_and_remove_notify_local_managers(real_db):
     assert status == 200
     dm.assert_called_once()
     assert dm.call_args.args[1] == ":wave: `Stub` left `Shared`."
+    left = DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.id == peer["group"].id])[0]
+    assert left.invite_code == "GRP-TEST01"
 
     with (
         patch("helpers.notifications.get_bot_token", return_value="xoxb-test"),
@@ -995,6 +997,41 @@ def test_group_leave_and_remove_notify_local_managers(real_db):
         )
         == []
     )
+    removed = DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.id == peer["group"].id])[0]
+    assert removed.invite_code != "GRP-TEST01"
+    assert removed.invite_code.startswith("FED-")
+    assert (
+        DbManager.find_records(
+            schemas.WorkspaceGroup,
+            [schemas.WorkspaceGroup.invite_code == "GRP-TEST01"],
+        )
+        == []
+    )
+
+
+def test_member_remove_changes_the_invite_code_first(real_db):
+    from db import DbManager, schemas
+    from federation.api import handle_group_member_remove
+
+    peer = _seed_peer()
+    with (
+        patch("federation.api.helpers.replace_group_invite_code", side_effect=RuntimeError),
+        patch("helpers.notifications.notify_admins_dm") as dm,
+        pytest.raises(RuntimeError),
+    ):
+        handle_group_member_remove(
+            {"uid": peer["group"].uid, "team_id": "TSTUB", "notice": ":wave: removed `Stub` from `Shared`."},
+            peer["fed"],
+        )
+    kept = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [
+            schemas.WorkspaceGroupMember.group_id == peer["group"].id,
+            schemas.WorkspaceGroupMember.workspace_id == peer["stub"].id,
+        ],
+    )
+    assert kept
+    dm.assert_not_called()
 
 
 def test_replicate_role_and_disband_payloads(real_db):
@@ -2086,7 +2123,7 @@ def test_export_includes_paused_remote_post_meta(real_db):
     peer = _seed_peer()
     _sync, _local_sc, _stub_sc = _seed_shared_sync(peer)
     soft_delete_workspace(peer["stub"])
-    payload = build_migration_export(peer["local"].id, include_source_instance=False)
+    payload = build_migration_export(peer["local"].id)
     channels = {(row["team_id"], row["channel_id"]) for row in payload["sync_channels"]}
     assert ("TSTUB", "CSTUB") not in channels
     assert "44444444-4444-4444-4444-444444444444:CSTUB" not in payload["post_meta"]

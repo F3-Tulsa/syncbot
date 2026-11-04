@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- version list -->
 
+## [Unreleased]
+
+### Changed
+
+- Data Migration import does not create or join an External Connection. Connect the two instances with Create and Join first
+- Import accepts only a file exported from this instance or from a connected instance, and a file from before 1.7.3 needs a new export
+- Confirm Import says where the file came from, and Syncs wait while another connected instance still has the Workspace
+- The import review and DM say what is left out, such as a Workspace that is not on this instance yet
+- Data Migration screens and messages use plain language
+- A file hosted outside Slack, such as a Google Drive file, is copied as a link
+- Export names the instance that made the file, and Import checks the file's signature with that instance's key
+- A new External Connection gets the other instance's Workspaces on its next keep-warm
+- Export and Request Connection is removed. Use Export for the file, and Create Connection and Join for the connection
+
+### Fixed
+
+- Federation accepts requests only from peer instances, never from this instance's own id
+- A connection is created only from the public key in the connection code
+- Federation requests go only to public addresses, and SyncBot downloads files only from Slack
+- The Authorize link uses only an address Slack has confirmed
+- A form that shows a field error saves nothing
+- Join no longer reports a failure when its first request already connected
+- The import DM says whether the Syncs are running or waiting, what was left out, and when to try again
+- Import changes only the importing Workspace and Workspaces on a connected instance, and joins only Groups it is already in
+- Removing a Workspace from a Group gives the Group a new invite code
 
 ## [1.7.2] - 2026-10-30
 

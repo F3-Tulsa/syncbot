@@ -92,6 +92,16 @@ def peer_is_trusted(peer: schemas.Instance | None) -> bool:
     return (getattr(peer, "trust_status", None) or "trusted") == "trusted"
 
 
+def is_self_instance(row: object | None) -> bool:
+    """True when *row* is this install's ``instances`` row.
+
+    A mock or any other object is not self. Only a stored private key marks
+    the row.
+    """
+    key = getattr(row, "private_key_encrypted", None)
+    return isinstance(key, str) and bool(key)
+
+
 def is_deliverable_workspace(workspace: schemas.Workspace | None) -> bool:
     """Local with this instance, or stub whose peer is active and trusted."""
     if is_local_workspace(workspace):
@@ -164,7 +174,7 @@ def _announce_stub_rows(rows: list, *, state: str) -> None:
 
 def mark_peer_trusted(peer: schemas.Instance) -> None:
     """Mark *peer* trusted and unpause SyncChannels on its stub workspaces."""
-    if peer is None or not getattr(peer, "instance_id", None):
+    if peer is None or not getattr(peer, "instance_id", None) or is_self_instance(peer):
         return
     DbManager.update_records(
         schemas.Instance,
@@ -197,7 +207,7 @@ def mark_peer_trusted(peer: schemas.Instance) -> None:
 
 def mark_peer_untrusted(peer: schemas.Instance) -> None:
     """Mark *peer* untrusted and pause SyncChannels on its stub workspaces."""
-    if peer is None or not getattr(peer, "instance_id", None):
+    if peer is None or not getattr(peer, "instance_id", None) or is_self_instance(peer):
         return
     DbManager.update_records(
         schemas.Instance,

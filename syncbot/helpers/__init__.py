@@ -62,13 +62,17 @@ from helpers.envelope import (
     get_post_id_for_post_records,
 )
 from helpers.files import (
+    add_outside_file_links,
     cleanup_temp_files,
     download_slack_files,
+    drop_outside_files,
     event_has_downloadable_hosted_file,
     event_is_new_file_share,
     event_keeps_hosted_files,
     file_ids_from_message_event,
     hosted_file_fetch_url,
+    is_outside_file,
+    is_slack_file_url,
     upload_files_to_slack,
 )
 from helpers.group_roles import (
@@ -84,6 +88,7 @@ from helpers.group_roles import (
     get_promotable_members,
     get_retained_owners,
     is_workspace_owner,
+    replace_group_invite_code,
     succeed_ownership,
 )
 from helpers.message_blocks import (
@@ -109,11 +114,9 @@ from helpers.notifications import (
 )
 from helpers.oauth import (
     capture_public_base,
-    capture_public_base_from_lambda_event,
     get_oauth_flow,
     get_public_base_url,
     public_base_from_headers,
-    public_base_from_lambda_event,
     remember_public_base,
 )
 from helpers.post_meta import (
@@ -227,6 +230,7 @@ from helpers.workspace_kind import (
     convert_workspace_to_local,
     ensure_stub_workspace,
     is_local_workspace,
+    is_self_instance,
     is_stub_workspace,
     peer_for_workspace,
     restore_peer_stubs,
@@ -275,6 +279,8 @@ __all__ = [
     "cleanup_temp_files",
     "decrypt_bot_token",
     "delete_message",
+    "add_outside_file_links",
+    "drop_outside_files",
     "download_slack_files",
     "event_has_downloadable_hosted_file",
     "event_has_slack_hosted_media_blocks",
@@ -282,6 +288,8 @@ __all__ = [
     "event_keeps_hosted_files",
     "file_ids_from_message_event",
     "hosted_file_fetch_url",
+    "is_outside_file",
+    "is_slack_file_url",
     "is_slack_hosted_media_url",
     "encrypt_bot_token",
     "ACTION_ADD",
@@ -313,6 +321,7 @@ __all__ = [
     "ensure_stub_workspace",
     "convert_workspace_to_local",
     "is_local_workspace",
+    "is_self_instance",
     "is_stub_workspace",
     "peer_for_workspace",
     "restore_peer_stubs",
@@ -325,9 +334,7 @@ __all__ = [
     "get_oauth_flow",
     "get_public_base_url",
     "capture_public_base",
-    "capture_public_base_from_lambda_event",
     "public_base_from_headers",
-    "public_base_from_lambda_event",
     "remember_public_base",
     "normalize_display_name",
     "get_own_bot_id",
@@ -380,6 +387,7 @@ __all__ = [
     "get_promotable_members",
     "get_retained_owners",
     "is_workspace_owner",
+    "replace_group_invite_code",
     "post_message",
     "purge_stale_soft_deletes",
     "purge_sync",

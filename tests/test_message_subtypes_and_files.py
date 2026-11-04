@@ -564,3 +564,136 @@ class TestDeliverRemoteFileContract:
         notify.assert_called_once()
         assert notify.call_args.kwargs["details"]["reason"] == "assemble_failed"
         assert notify.call_args.kwargs["details"]["error"] == "assemble_failed"
+
+
+def _sync_patches():
+    return [
+        patch("handlers.message._is_own_bot_message", return_value=False),
+        patch("handlers.message._build_file_context", return_value=([], [])),
+        patch("handlers.message.run_claimed", side_effect=lambda _body, fn: fn()),
+        patch("handlers.message.helpers.has_channel_sync", return_value=True),
+        patch("handlers.message.helpers.origin_publishes_anywhere", return_value=True),
+        patch("handlers.message.helpers.iter_publish_targets", return_value=[object()]),
+        patch("handlers.message.helpers.post_meta_exists_for_channel_ts", return_value=False),
+        patch("handlers.message.helpers.has_user_action_echo", return_value=False),
+        patch("handlers.message.helpers.take_user_action_echo", return_value=False),
+    ]
+
+
+class TestOutsideFiles:
+    def test_hosted_file_url_accepts_only_slack(self):
+        from helpers.files import hosted_file_fetch_url, is_slack_file_url
+
+        assert hosted_file_fetch_url({"url_private": "https://files.slack.com/files-pri/F1"}) == (
+            "https://files.slack.com/files-pri/F1"
+        )
+        for url in (
+            "https://peer.example/x",
+            "http://files.slack.com/x",
+            "https://user:pw@files.slack.com/x",
+            "https://files.slack.com.peer.example/x",
+            "https://peerfiles.slack.com/x",
+        ):
+            assert is_slack_file_url(url) is False
+            assert hosted_file_fetch_url({"url_private": url}) is None
+        assert hosted_file_fetch_url({"is_external": True, "url_private": "https://files.slack.com/x"}) is None
+
+    def test_links_for_rich_text_and_plain_text(self):
+        from helpers.files import add_outside_file_links
+
+        outside = [{"is_external": True, "external_url": "https://ws-a.example/a", "external_type": "gdrive"}]
+        text, blocks = add_outside_file_links("Hello", [{"type": "rich_text", "elements": []}], outside)
+        assert "<https://ws-a.example/a>" in text
+        assert blocks[-1]["type"] == "rich_text"
+        assert blocks[-1]["elements"][0]["elements"][0] == {"type": "link", "url": "https://ws-a.example/a"}
+        plain, no_blocks = add_outside_file_links("Hello", None, outside)
+        assert plain.endswith("<https://ws-a.example/a>")
+        assert no_blocks == []
+
+    def test_upload_download_refuses_other_hosts_and_redirects(self):
+        import urllib.error
+        import urllib.request
+
+        from handlers.export_import import _download_uploaded_file
+
+        text, err = _download_uploaded_file("https://peer.example/x", "xoxb-secret")
+        assert text is None
+        assert err
+        import io
+        from email.message import EmailMessage
+
+        body = io.BytesIO(b"")
+        opened = MagicMock()
+        opened.open.side_effect = urllib.error.HTTPError(
+            "https://files.slack.com/files-pri/F1",
+            302,
+            "Found",
+            EmailMessage(),
+            body,
+        )
+        with patch("urllib.request.build_opener", return_value=opened) as build:
+            _download_uploaded_file("https://files.slack.com/files-pri/F1", "xoxb-secret")
+        opened.open.side_effect.close()
+        handler = build.call_args.args[0]()
+        assert isinstance(handler, urllib.request.HTTPRedirectHandler)
+        assert handler.redirect_request(None, None, 302, "Found", {}, "https://peer.example/x") is None
+
+    def test_bot_message_with_only_an_outside_file_syncs_the_link(self):
+        body = _message_body(
+            subtype="bot_message",
+            text="See this",
+            files=[{"id": "F1", "mode": "external", "external_url": "https://ws-a.example/file"}],
+        )
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for item in _sync_patches():
+                stack.enter_context(item)
+            new_post = stack.enter_context(patch("handlers.message._handle_new_post"))
+            notify = stack.enter_context(patch("handlers.message.helpers.notify_source_user_error"))
+            respond_to_message_event(body, MagicMock(), MagicMock(), {})
+        new_post.assert_called_once()
+        ctx = new_post.call_args.args[3]
+        assert "<https://ws-a.example/file>" in ctx["msg_text"]
+        notify.assert_not_called()
+
+    def test_text_reply_does_not_repeat_a_parent_outside_file(self):
+        body = _message_body(
+            text="thanks",
+            thread_ts="1234567890.000001",
+            files=[{"id": "F1", "is_external": True, "external_url": "https://ws-a.example/parent"}],
+        )
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for item in _sync_patches():
+                stack.enter_context(item)
+            reply = stack.enter_context(patch("handlers.message._handle_thread_reply"))
+            respond_to_message_event(body, MagicMock(), MagicMock(), {})
+        reply.assert_called_once()
+        ctx = reply.call_args.args[3]
+        assert "ws-a.example" not in (ctx.get("msg_text") or "")
+
+    def test_message_changed_keeps_the_outside_link(self):
+        event = {
+            "type": "message",
+            "subtype": "message_changed",
+            "channel": "C001",
+            "message": {
+                "user": "U001",
+                "text": "Updated",
+                "ts": "1234567890.000002",
+                "files": [{"id": "F1", "mode": "external", "external_url": "https://ws-a.example/file"}],
+            },
+        }
+        body = {"event_id": "Ev2", "team_id": "T001", "event": event}
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for item in _sync_patches():
+                stack.enter_context(item)
+            edit = stack.enter_context(patch("handlers.message._handle_message_edit"))
+            respond_to_message_event(body, MagicMock(), MagicMock(), {})
+        edit.assert_called_once()
+        ctx = edit.call_args.args[2]
+        assert "<https://ws-a.example/file>" in (ctx.get("msg_text") or "")

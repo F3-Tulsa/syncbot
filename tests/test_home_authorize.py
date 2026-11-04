@@ -378,6 +378,22 @@ class TestContentHashIsPerUser:
 
         assert authorized != not_authorized
 
+    def test_hash_changes_when_an_install_link_becomes_known(self):
+        with (
+            patch("builders.home.helpers.user_permission_lists", return_value=(ALL_LABELS, [])),
+            patch("builders.home.helpers.authorize_url", return_value=None),
+        ):
+            unknown = _home_tab_content_hash(WORKSPACE, "U1", is_manager=True, is_admin=True)
+            unknown_member = _home_tab_content_hash(WORKSPACE, "U1", is_manager=False, is_admin=False)
+        with (
+            patch("builders.home.helpers.user_permission_lists", return_value=(ALL_LABELS, [])),
+            patch("builders.home.helpers.authorize_url", return_value="https://ws-a.example/slack/install?team=T1"),
+        ):
+            known = _home_tab_content_hash(WORKSPACE, "U1", is_manager=True, is_admin=True)
+            known_member = _home_tab_content_hash(WORKSPACE, "U1", is_manager=False, is_admin=False)
+        assert unknown != known
+        assert unknown_member != known_member
+
     def test_hash_changes_when_new_scopes_are_still_needed(self):
         with patch("builders.home.helpers.user_permission_lists", return_value=(ALL_LABELS, [])):
             complete = _home_tab_content_hash(WORKSPACE, "U1")
@@ -550,6 +566,50 @@ class TestAppHomeOpenedHashShortCircuit:
             user_id="U1",
             view={"type": "home", "blocks": cached_blocks},
         )
+
+    def test_install_link_rebuilds_a_home_cached_without_one(self):
+        from builders.home import _home_tab_content_hash
+        from handlers.sync import handle_app_home_opened
+
+        client = MagicMock()
+        body = {"team_id": "T1", "event": {"user": "U1"}, "user": {"id": "U1"}}
+        with (
+            patch("builders.home._get_groups_for_workspace", return_value=[]),
+            patch("builders.home.DbManager.find_records", return_value=[]),
+            patch("builders.home.helpers.is_db_reset_visible_for_workspace", return_value=False),
+            patch("builders.home.helpers.user_permission_lists", return_value=(ALL_LABELS, [])),
+            patch("builders.home.helpers.authorize_url", return_value=None),
+        ):
+            stale = _home_tab_content_hash(
+                WORKSPACE,
+                "U1",
+                is_manager=True,
+                is_admin=True,
+                extra_manager_ids=(),
+                private_channel_ids=None,
+            )
+        with (
+            patch("handlers.sync.helpers.purge_stale_soft_deletes"),
+            patch("handlers.sync.helpers.get_workspace_record", return_value=WORKSPACE),
+            patch("handlers.sync.helpers.is_workspace_admin", return_value=True),
+            patch("handlers.sync.helpers.is_workspace_manager", return_value=True),
+            patch("handlers.sync.helpers.extra_manager_user_ids", return_value=[]),
+            patch("handlers.sync.viewer_context", return_value=_quiet_viewer()),
+            patch("builders.home.helpers.authorize_url", return_value="https://ws-a.example/slack/install?team=T1"),
+            patch("builders.home._get_groups_for_workspace", return_value=[]),
+            patch("builders.home.DbManager.find_records", return_value=[]),
+            patch("builders.home.helpers.is_db_reset_visible_for_workspace", return_value=False),
+            patch("builders.home.helpers.user_permission_lists", return_value=(ALL_LABELS, [])),
+            patch(
+                "handlers.sync.helpers._cache_get",
+                side_effect=lambda key: stale if "hash" in key else [{"type": "section"}],
+            ),
+            patch("handlers.sync.builders.build_home_tab") as build,
+            patch("handlers.sync.helpers.remember_home_viewer"),
+        ):
+            handle_app_home_opened(body, client, MagicMock(), {})
+        build.assert_called_once()
+        client.views_publish.assert_not_called()
 
 
 class TestFederationSectionOmitsSelf:

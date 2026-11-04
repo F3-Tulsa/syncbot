@@ -20,7 +20,7 @@ import constants
 from db import DbManager, get_engine, schemas
 from helpers.user_action_echo import post_meta_ts, slack_message_ts
 from helpers.workspace import get_workspace_by_id
-from logger import log_info, log_warning
+from logger import log_info
 
 # Dump-format integers. Bump when the JSON shape is incompatible with this
 # restore/import path. ``syncbot_version`` is the running package label only.
@@ -262,6 +262,8 @@ def restore_full_backup(
                 row = {**row, "mapped_at": row["matched_at"]}
             if table_name == "workspace_settings" and row.get("key") == "last_auto_match":
                 row = {**row, "key": "last_auto_map"}
+            if table_name == "instance_settings" and row.get("key") == constants.SETTING_PUBLIC_BASE_URL:
+                continue
             kwargs = {}
             for k, v in row.items():
                 if k not in known_columns:
@@ -352,13 +354,8 @@ def _channel_in_migration_export(sync_channel) -> bool:
     return status not in _EXPORT_SKIP_CHANNEL_STATUSES
 
 
-def build_migration_export(
-    workspace_id: int,
-    include_source_instance: bool = False,
-    *,
-    connection_code: str | None = None,
-) -> dict:
-    """Build workspace-scoped migration JSON. Optionally sign with Ed25519 and include source_instance."""
+def build_migration_export(workspace_id: int) -> dict:
+    """Build workspace-scoped migration JSON and sign it with Ed25519."""
     workspace = get_workspace_by_id(workspace_id)
     if not workspace or workspace.deleted_at:
         raise ValueError("Workspace not found")
@@ -563,41 +560,22 @@ def build_migration_export(
         "user_mappings": user_mappings_data,
     }
 
-    if include_source_instance:
-        from federation import core as federation
+    # Sign with Ed25519. source_instance is inside the signed bytes.
+    from federation import core as federation
 
-        try:
-            endpoint = federation.federation_endpoint_url()
-            instance_id = federation.get_instance_id()
-            _, public_key_pem = federation.get_or_create_instance_keypair()
-            if endpoint:
-                payload["source_instance"] = {
-                    "webhook_url": endpoint,
-                    "instance_id": instance_id,
-                    "public_key": public_key_pem,
-                }
-                if connection_code:
-                    payload["source_instance"]["connection_code"] = connection_code
-        except Exception as e:
-            log_warning("build_migration_export", error=str(e))
-
-    # Sign with Ed25519 (exclude signature from signed bytes; include signed_at)
-    try:
-        from federation import core as federation
-
-        payload["signed_at"] = datetime.now(UTC).isoformat() + "Z"
-        to_sign = {k: v for k, v in payload.items() if k != "signature"}
-        raw = canonical_json_dumps(to_sign).decode("utf-8")
-        payload["signature"] = federation.sign_body(raw)
-    except Exception as e:
-        log_warning("build_migration_export", error=str(e))
+    _, public_key = federation.get_or_create_instance_keypair()
+    payload["source_instance"] = {
+        "instance_id": federation.get_instance_id(),
+        "public_key": public_key,
+    }
+    payload["signed_at"] = datetime.now(UTC).isoformat() + "Z"
+    to_sign = {k: v for k, v in payload.items() if k != "signature"}
+    raw = canonical_json_dumps(to_sign).decode("utf-8")
+    payload["signature"] = federation.sign_body(raw)
 
     log_info(
         "migration_export",
         team_id=team_id,
-        signed=bool(payload.get("signature")),
-        has_source_instance=bool(payload.get("source_instance")),
-        has_connection_code=bool((payload.get("source_instance") or {}).get("connection_code")),
         groups=len(groups_data),
         syncs=len(syncs_data),
         channels=len(sync_channels_data),
@@ -606,49 +584,65 @@ def build_migration_export(
 
 
 def verify_migration_signature(data: dict) -> bool:
-    """Verify Ed25519 signature using source_instance.public_key. Returns False if no signature or invalid."""
+    """Verify the file with the public key of the install named in it.
+
+    Returns False when the signature, ``source_instance``, or its public key is
+    missing, when ``instance_id`` is not that key's fingerprint, or when the
+    signature does not match.
+    """
     sig = data.get("signature")
     source = data.get("source_instance")
-    if not sig or not source:
+    if not sig or not isinstance(source, dict):
         return False
     public_key = source.get("public_key")
-    if not public_key:
+    instance_id = str(source.get("instance_id") or "").strip()
+    if not public_key or not instance_id:
+        return False
+    from federation import core as federation
+
+    if not federation.instance_id_matches_public_key(instance_id, public_key):
         return False
     to_verify = {k: v for k, v in data.items() if k != "signature"}
     raw = canonical_json_dumps(to_verify).decode("utf-8")
-    from federation import core as federation
-
     return federation.verify_body(raw, sig, public_key)
 
 
-def _peer_instance_id_from_migration(data: dict) -> str | None:
-    source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else None
-    instance_id = str((source or {}).get("instance_id") or "").strip()
-    if instance_id:
-        peers = DbManager.find_records(
-            schemas.Instance,
-            [schemas.Instance.instance_id == instance_id],
-        )
-        if peers and not getattr(peers[0], "private_key_encrypted", None):
-            return instance_id
-        return None
-    return _sole_trusted_peer_instance_id()
+def format_migration_source_name(instance_id: str, row=None) -> str:
+    """Name a signer by its connection name, never from the file."""
+    name = getattr(row, "name", None) if row is not None else None
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    prefix = (instance_id or "").strip()[:8]
+    return f"Connection {prefix}" if prefix else "Connection"
 
 
-def _sole_trusted_peer_instance_id() -> str | None:
-    """The only trusted External Connection, if this instance has exactly one."""
-    peers = DbManager.find_records(
-        schemas.Instance,
-        [
-            schemas.Instance.private_key_encrypted.is_(None),
-            schemas.Instance.status == "active",
-            schemas.Instance.trust_status == "trusted",
-        ],
-    )
-    ids = [str(peer.instance_id).strip() for peer in peers if getattr(peer, "instance_id", None)]
-    if len(ids) != 1:
-        return None
-    return ids[0]
+def get_migration_file_status(data: dict) -> tuple[str, object | None]:
+    """Classify a migration file before Import will accept it.
+
+    ``unchecked`` has no signature. ``tampered`` has a signature that does not
+    check. ``this_install`` and ``connected`` may be imported. Anything else
+    is refused. The self row is trusted, so it is checked before a peer.
+    """
+    from helpers.settings import federation_enabled
+    from helpers.workspace_kind import is_self_instance, peer_is_trusted
+
+    source = data.get("source_instance") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or not data.get("signature") or not isinstance(source, dict):
+        return "unchecked", None
+    if not verify_migration_signature(data):
+        return "tampered", None
+    instance_id = str(source.get("instance_id") or "").strip()
+    row = DbManager.get_record(schemas.Instance, id=instance_id) if instance_id else None
+    if row is None:
+        return "unknown", None
+    if is_self_instance(row):
+        return "this_install", row
+    active_peer = peer_is_trusted(row) and getattr(row, "status", None) == "active"
+    if active_peer and not federation_enabled():
+        return "federation_off", row
+    if active_peer:
+        return "connected", row
+    return "not_connected", row
 
 
 def _workspace_id_for_imported_team(
@@ -657,17 +651,29 @@ def _workspace_id_for_imported_team(
     this_workspace_id: int,
     team_id_to_workspace_id: dict[str, int],
 ) -> int | None:
-    """Resolve a Slack Team ID from the file to an existing workspace PK (live or stub)."""
+    """Resolve a Slack team id from the import map.
+
+    A blank team id is the importing Workspace. Any other team that the map
+    does not already name is left out. This does not look a team up.
+    """
     tid = (team_id or "").strip()
     if not tid:
         return this_workspace_id
-    if tid in team_id_to_workspace_id:
-        return team_id_to_workspace_id[tid]
-    matches = DbManager.find_records(schemas.Workspace, [schemas.Workspace.team_id == tid])
-    if matches and getattr(matches[0], "id", None):
-        team_id_to_workspace_id[tid] = matches[0].id
-        return matches[0].id
-    return None
+    return team_id_to_workspace_id.get(tid)
+
+
+def _workspace_is_active_group_member(group_id: int, workspace_id: int) -> bool:
+    """True when *workspace_id* has an active membership in *group_id*."""
+    rows = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [
+            schemas.WorkspaceGroupMember.group_id == group_id,
+            schemas.WorkspaceGroupMember.workspace_id == workspace_id,
+            schemas.WorkspaceGroupMember.status == "active",
+            schemas.WorkspaceGroupMember.deleted_at.is_(None),
+        ],
+    )
+    return bool(rows)
 
 
 def _ensure_group_membership(group_id: int, workspace_id: int, *, role, now) -> None:
@@ -715,7 +721,10 @@ def import_migration_data(
         existing = DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.uid == uid])
         if existing and not _group_is_active(existing[0]):
             continue
+        creating = not existing
         if existing:
+            if not _workspace_is_active_group_member(existing[0].id, workspace_id):
+                continue
             group = existing[0]
         else:
             group = DbManager.create_record(
@@ -730,6 +739,8 @@ def import_migration_data(
         group_uid_to_id[uid] = group.id
         this_role = group_entry.get("role") or "member"
         _ensure_group_membership(group.id, workspace_id, role=this_role, now=now)
+        if creating:
+            continue
         named_members = group_entry.get("member_workspaces") or []
         if named_members:
             others = named_members
@@ -757,6 +768,8 @@ def import_migration_data(
         existing = DbManager.find_records(schemas.Sync, [schemas.Sync.uid == uid])
         if existing:
             sync = existing[0]
+            if sync.group_id != target_group_id:
+                continue
             DbManager.update_records(
                 schemas.Sync,
                 [schemas.Sync.id == sync.id],
@@ -867,7 +880,7 @@ def import_migration_data(
                     parent_post_id=post_meta.get("parent_post_id"),
                     reaction=post_meta.get("reaction"),
                     source_user_id=post_meta.get("source_user_id"),
-                    source_workspace_id=team_id_to_workspace_id.get(source_team_id) if source_team_id else None,
+                    source_workspace_id=(team_id_to_workspace_id.get(source_team_id) if source_team_id else None),
                     posted_as_user_id=post_meta.get("posted_as_user_id"),
                 )
             )
@@ -897,11 +910,21 @@ def import_migration_data(
         mapped_group_uid = str(um.get("group_uid") or "").strip()
         if mapped_group_uid and mapped_group_uid not in group_uid_to_id:
             continue
-        src_team = um.get("source_team_id")
-        tgt_team = um.get("target_team_id")
-        src_ws_id = team_id_to_workspace_id.get(src_team) if src_team else None
-        tgt_ws_id = team_id_to_workspace_id.get(tgt_team) if tgt_team else None
-        if not src_ws_id or not tgt_ws_id:
+        src_team = str(um.get("source_team_id") or "").strip()
+        tgt_team = str(um.get("target_team_id") or "").strip()
+        if not src_team or not tgt_team:
+            continue
+        src_ws_id = _workspace_id_for_imported_team(
+            src_team,
+            this_workspace_id=workspace_id,
+            team_id_to_workspace_id=team_id_to_workspace_id,
+        )
+        tgt_ws_id = _workspace_id_for_imported_team(
+            tgt_team,
+            this_workspace_id=workspace_id,
+            team_id_to_workspace_id=team_id_to_workspace_id,
+        )
+        if not src_ws_id or not tgt_ws_id or workspace_id not in (src_ws_id, tgt_ws_id):
             continue
         existing = DbManager.find_records(
             schemas.UserMapping,

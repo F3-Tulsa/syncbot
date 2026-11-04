@@ -496,7 +496,7 @@ After deploying a build that changes Slack listener wiring, verify **in the depl
 1. **Create Sync** — Open **Create Sync**, choose participation and a Channel on the same screen, then **Create Sync**. Create a Sync, then Create Sync on that same channel into another group and confirm it is accepted. A channel that already participates in another Channel Sync must still be accepted.
 2. **Join Sync** — Open **Join Sync** from an available relationship, choose participation and a local Channel on the same screen, then **Join Sync**. A channel that already participates in another Channel Sync must still be accepted, while trying to join the same workspace to the same published source twice must show a field error.
 3. **Backup / Restore** — Open Backup/Restore; try restore validation (e.g. missing file) and, if possible, the integrity-warning confirmation path (`push`).
-4. **Data migration** (if federation enabled) — Same style of checks for import validation and confirmation.
+4. **Data migration** — Same style of checks for import validation and confirmation, with a file from this instance and one from a connected instance.
 5. **Optional** — After a cold start, click a Home button that opens a modal. The modal should appear, and the form fills in after the ack.
 6. **Optional, private Channels** — If they are allowed in **Settings**, click **Authorize SyncBot**, then Create Sync on a private Channel in one workspace and Join Sync from another. SyncBot should appear in both Channels without a warning DM.
 

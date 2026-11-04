@@ -119,6 +119,28 @@ class TestMainResponseLocalDevViewSubmission:
 
         ack.assert_called_once_with()
 
+    @patch.object(app_module, "LOCAL_DEVELOPMENT", True)
+    def test_field_errors_skip_the_work_handler(self):
+        ack = MagicMock()
+        called = {"work": False}
+
+        def work(b, c, log, ctx):
+            called["work"] = True
+
+        def ack_handler(b, c, ctx):
+            return {"response_action": "errors", "errors": {"block": "Choose a Workspace."}}
+
+        cid = "view_under_test"
+        with (
+            patch.object(app_module, "MAIN_MAPPER", {"view_submission": {cid: work}}),
+            patch.object(app_module, "VIEW_ACK_MAPPER", {cid: ack_handler}),
+            patch.object(app_module, "emit_metric"),
+            patch("helpers._cache.begin_request_scope"),
+        ):
+            app_module.main_response(_body_view_submit(cid), MagicMock(), MagicMock(), ack, {})
+        ack.assert_called_once_with(response_action="errors", errors={"block": "Choose a Workspace."})
+        assert called["work"] is False
+
 
 class TestMainResponseProdViewSubmission:
     """Production main_response (lazy): does not call ack for view_submission."""
@@ -140,6 +162,28 @@ class TestMainResponseProdViewSubmission:
             app_module.main_response(_body_view_submit(cid), MagicMock(), MagicMock(), ack, context)
 
         ack.assert_not_called()
+
+    @patch.object(app_module, "LOCAL_DEVELOPMENT", False)
+    def test_field_errors_skip_the_work_handler(self):
+        ack = MagicMock()
+        called = {"work": False}
+
+        def work(b, c, log, ctx):
+            called["work"] = True
+
+        def ack_handler(b, c, ctx):
+            return {"response_action": "errors", "errors": {"block": "Choose a Workspace."}}
+
+        cid = "view_under_test"
+        with (
+            patch.object(app_module, "MAIN_MAPPER", {"view_submission": {cid: work}}),
+            patch.object(app_module, "VIEW_ACK_MAPPER", {cid: ack_handler}),
+            patch.object(app_module, "emit_metric"),
+            patch("helpers._cache.begin_request_scope"),
+        ):
+            app_module.main_response(_body_view_submit(cid), MagicMock(), MagicMock(), ack, {})
+        ack.assert_not_called()
+        assert called["work"] is False
 
 
 class TestLambdaHandler:
@@ -251,9 +295,11 @@ class TestLambdaHandler:
                 },
                 {},
             )
+        import helpers.oauth as oauth_mod
         from helpers.oauth import get_public_base_url
 
-        assert get_public_base_url() == "https://fn.lambda-url.us-east-1.on.aws"
+        oauth_mod._verified_public_base = False
+        assert get_public_base_url() is None
 
     def test_federation_path_is_404_when_settings_off(self):
         with (

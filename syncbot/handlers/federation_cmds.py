@@ -394,34 +394,15 @@ def _reencode_pairing_code(pairing, context: dict | None) -> str | None:
         return None
 
 
-def open_create_external_connection_modal(
-    body: dict,
-    client: WebClient,
-    *,
-    request_id: int | None = None,
-    exclude_workspace_id: int | None = None,
-    initial_name: str | None = None,
-    leaving_workspace_name: str | None = None,
-) -> None:
-    """Open the Create Connection modal, optionally for an approved migration request."""
+def open_create_external_connection_modal(body: dict, client: WebClient) -> None:
+    """Open the Create Connection modal."""
     trigger_id = helpers.safe_get(body, "trigger_id")
     if not trigger_id:
         return
-    exclude_ids = [exclude_workspace_id] if exclude_workspace_id else None
-    blocks = []
-    if request_id and leaving_workspace_name:
-        blocks.append(
-            section(f"`{leaving_workspace_name}` is leaving this instance, so it is not in the Workspace list.")
-        )
-    blocks.extend(_connection_name_block(action=actions.CONFIG_CREATE_EXTERNAL_CONNECTION_NAME, initial=initial_name))
-    blocks.extend(_workspaces_block(action=actions.CONFIG_CREATE_EXTERNAL_WORKSPACES, exclude_ids=exclude_ids))
-    metadata = {}
-    if request_id:
-        metadata["request_id"] = request_id
-    if exclude_workspace_id:
-        metadata["exclude_workspace_id"] = exclude_workspace_id
-        if not _local_workspace_options(exclude_ids=exclude_ids):
-            metadata["allow_empty_allowlist"] = True
+    blocks = [
+        *_connection_name_block(action=actions.CONFIG_CREATE_EXTERNAL_CONNECTION_NAME),
+        *_workspaces_block(action=actions.CONFIG_CREATE_EXTERNAL_WORKSPACES),
+    ]
     orm.BlockView(blocks=blocks).post_modal(
         client=client,
         trigger_id=trigger_id,
@@ -429,7 +410,6 @@ def open_create_external_connection_modal(
         title_text="Create Connection",
         submit_button_text="Create",
         close_button_text="Cancel",
-        parent_metadata=metadata or None,
         body=body,
     )
 
@@ -459,20 +439,10 @@ def handle_create_external_connection_submit_ack(body: dict, client: WebClient, 
             "response_action": "errors",
             "errors": {actions.CONFIG_CREATE_EXTERNAL_CONNECTION_NAME: "Enter a name for this connection."},
         }
-    meta = _parse_private_metadata(body)
-    workspace_ids = _drop_excluded_workspace_ids(
-        _parse_workspace_ids(_multi_select_values(values, actions.CONFIG_CREATE_EXTERNAL_WORKSPACES)),
-        meta.get("exclude_workspace_id"),
-    )
-    if not workspace_ids and not meta.get("allow_empty_allowlist"):
+    workspace_ids = _parse_workspace_ids(_multi_select_values(values, actions.CONFIG_CREATE_EXTERNAL_WORKSPACES))
+    if not workspace_ids:
         return _allowlist_field_error(actions.CONFIG_CREATE_EXTERNAL_WORKSPACES)
     payload = {"label": label, "workspace_ids": workspace_ids}
-    if meta.get("request_id"):
-        payload["request_id"] = meta["request_id"]
-    if meta.get("exclude_workspace_id") is not None:
-        payload["exclude_workspace_id"] = meta["exclude_workspace_id"]
-    if meta.get("allow_empty_allowlist"):
-        payload["allow_empty_allowlist"] = True
     return _wait_modal_ack(
         title="Create Connection",
         callback_id=actions.CONFIG_CREATE_EXTERNAL_CONNECTION_SUBMIT,
@@ -499,30 +469,11 @@ def handle_create_external_connection_submit(
     values = _view_values(body)
     label = str(meta.get("label") or "").strip() or _input_text(values, actions.CONFIG_CREATE_EXTERNAL_CONNECTION_NAME)
     raw_ids = meta.get("workspace_ids") or []
-    workspace_ids = _drop_excluded_workspace_ids(
-        _parse_workspace_ids([str(item) for item in raw_ids])
-        or _parse_workspace_ids(_multi_select_values(values, actions.CONFIG_CREATE_EXTERNAL_WORKSPACES)),
-        meta.get("exclude_workspace_id"),
+    workspace_ids = _parse_workspace_ids([str(item) for item in raw_ids]) or _parse_workspace_ids(
+        _multi_select_values(values, actions.CONFIG_CREATE_EXTERNAL_WORKSPACES)
     )
-    if not label:
+    if not label or not workspace_ids:
         return
-    if not workspace_ids and not meta.get("allow_empty_allowlist"):
-        return
-
-    request = None
-    request_id = meta.get("request_id")
-    if request_id:
-        try:
-            request = DbManager.get_record(schemas.FederationPairingRequest, id=int(request_id))
-        except (TypeError, ValueError):
-            request = None
-        if request is None or request.status != "pending":
-            _update_connection_code_modal(
-                client,
-                body,
-                [section(":warning: This request was already approved or declined.")],
-            )
-            return
 
     missing_url = (
         ":warning: SyncBot does not know this instance's public URL yet. "
@@ -536,9 +487,8 @@ def handle_create_external_connection_submit(
         return
 
     try:
-        encoded, raw_code = federation.generate_federation_code(
+        encoded, _raw_code = federation.generate_federation_code(
             label=label,
-            subject_team_id=request.subject_team_id if request else None,
             context=context,
             workspace_ids=workspace_ids,
         )
@@ -567,19 +517,6 @@ def handle_create_external_connection_submit(
                 )
         except Exception as e:
             log_warning("failed_to_dm_connection_code", error=str(e))
-
-    if request:
-        from handlers.export_import import fulfill_pairing_request
-
-        try:
-            fulfill_pairing_request(
-                request,
-                encoded=encoded,
-                raw_code=raw_code,
-                resolved_by_user_id=user_id or "",
-            )
-        except Exception:
-            log_error("pairing_request_fulfill_failed", request_id=request.id, exc_info=True)
 
     log_info("federation_code_generated", workspace_id=workspace_record.id, label=label)
 
@@ -699,6 +636,16 @@ def handle_join_external_connection_submit_ack(body: dict, client: WebClient, co
                 )
             },
         }
+    self_row = DbManager.get_record(schemas.Instance, id=payload["instance_id"])
+    if helpers.is_self_instance(self_row):
+        return {
+            "response_action": "errors",
+            "errors": {
+                actions.CONFIG_JOIN_EXTERNAL_CONNECTION_CODE: (
+                    "That code is from this SyncBot instance. Paste a code from the other instance."
+                )
+            },
+        }
     review = orm.BlockView(
         blocks=[
             *_connection_detail_blocks(payload),
@@ -789,7 +736,15 @@ def handle_join_external_connection_review(
         _close_modal_done(client, body, connect_failed)
         return
 
-    remote_public_key = result.get("public_key", "")
+    response_key = result.get("public_key") if isinstance(result.get("public_key"), str) else ""
+    if response_key and not federation.instance_id_matches_public_key(remote_instance_id, response_key):
+        key_mismatch = (
+            f":warning: Could not connect to `{remote_name}`. Ask the other admin to create a new connection code."
+        )
+        _dm_actor(client, body, key_mismatch)
+        _close_modal_done(client, body, key_mismatch)
+        return
+
     remote_team_id = result.get("team_id") if isinstance(result.get("team_id"), str) else None
     remote_workspace_name = result.get("workspace_name") if isinstance(result.get("workspace_name"), str) else None
     if remote_team_id:
@@ -798,7 +753,7 @@ def handle_join_external_connection_review(
     fed_ws = federation.get_or_create_instance(
         instance_id=remote_instance_id,
         webhook_url=remote_url,
-        public_key=remote_public_key,
+        public_key=payload["public_key"],
         name=remote_name,
         primary_team_id=primary_team or remote_team_id,
         primary_workspace_name=primary_name or remote_workspace_name,

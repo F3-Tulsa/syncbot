@@ -361,9 +361,11 @@ class TestEndpointAndSubpaths:
             patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
             patch.object(federation_core, "get_instance_id", return_value="fp"),
             patch.object(federation_core, "peer_session", return_value=session),
+            patch.object(federation_core, "_webhook_url_refusal", return_value=None),
         ):
             federation_core._federation_request(fed_ws, "/message", {"a": 1})
         assert session.request.call_args.args[1] == "https://peer.example/api/federation/message"
+        assert session.request.call_args.kwargs["allow_redirects"] is False
 
     def test_initiate_appends_pair_and_sends_endpoint(self):
         _private, public_pem = _keypair()
@@ -371,7 +373,7 @@ class TestEndpointAndSubpaths:
         resp.json.return_value = {"ok": True, "public_key": public_pem}
         with (
             patch.object(federation_core, "get_public_url", return_value="https://this-instance.example"),
-            patch.object(federation_core, "validate_webhook_url", return_value=True),
+            patch.object(federation_core, "_webhook_url_refusal", return_value=None),
             patch.object(federation_core, "get_or_create_instance_keypair", return_value=(_private, public_pem)),
             patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
             patch.object(federation_core, "get_instance_id", return_value="fp"),
@@ -379,8 +381,143 @@ class TestEndpointAndSubpaths:
         ):
             federation_core.initiate_federation_connect("https://peer.example/api/federation", "FED-1")
         assert post.call_args.args[0] == "https://peer.example/api/federation/pair"
+        assert post.call_args.kwargs["allow_redirects"] is False
         sent = json.loads(post.call_args.kwargs["data"])
         assert sent["webhook_url"] == "https://this-instance.example/api/federation"
+
+
+class TestWebhookHostCheck:
+    def test_private_and_mapped_addresses_are_refused(self, monkeypatch):
+        import socket
+
+        refused = (
+            "127.0.0.1",
+            "0.0.0.0",
+            "100.64.0.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "::ffff:127.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            "2002:7f00:1::",
+            "fec0::1",
+        )
+
+        def fake_lookup(_host, _port):
+            return [(None, None, None, None, (fake_lookup.ip, 0))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", fake_lookup)
+        for ip in refused:
+            fake_lookup.ip = ip
+            assert federation_core.validate_webhook_url("https://peer.example/api/federation") is False
+
+    def test_userinfo_is_refused(self):
+        assert federation_core.validate_webhook_url("https://user@peer.example/api/federation") is False
+
+    def test_lookup_failure_retries_before_the_send(self):
+        fed_ws = SimpleNamespace(webhook_url="https://peer.example/api/federation", instance_id="fp")
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"ok": True}
+        session = MagicMock()
+        session.request.return_value = resp
+        with (
+            patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
+            patch.object(federation_core, "get_instance_id", return_value="self"),
+            patch.object(federation_core, "peer_session", return_value=session),
+            patch.object(federation_core, "_webhook_url_refusal", side_effect=["lookup_failed", None]),
+            patch.object(federation_core.time, "sleep"),
+        ):
+            result = federation_core._federation_request(fed_ws, "/message", {"a": 1})
+        assert result["ok"] is True
+        session.request.assert_called_once()
+
+    def test_refused_host_sends_nothing(self):
+        fed_ws = SimpleNamespace(webhook_url="https://peer.example/api/federation", instance_id="fp")
+        session = MagicMock()
+        with (
+            patch.object(federation_core, "peer_session", return_value=session),
+            patch.object(federation_core, "_webhook_url_refusal", return_value="refused"),
+        ):
+            assert federation_core._federation_request(fed_ws, "/message", {"a": 1}) is None
+        session.request.assert_not_called()
+
+    def test_redirect_is_not_followed(self):
+        fed_ws = SimpleNamespace(webhook_url="https://peer.example/api/federation", instance_id="fp")
+        resp = MagicMock(status_code=302)
+        resp.json.return_value = {}
+        session = MagicMock()
+        session.request.return_value = resp
+        with (
+            patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
+            patch.object(federation_core, "get_instance_id", return_value="self"),
+            patch.object(federation_core, "peer_session", return_value=session),
+            patch.object(federation_core, "_webhook_url_refusal", return_value=None),
+        ):
+            assert federation_core._federation_request(fed_ws, "/message", {"a": 1}) is None
+        assert session.request.call_args.kwargs["allow_redirects"] is False
+
+    def test_file_part_retries_a_failed_lookup(self):
+        fed_ws = SimpleNamespace(webhook_url="https://peer.example/api/federation", instance_id="fp")
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"ok": True}
+        with (
+            patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
+            patch.object(federation_core, "get_instance_id", return_value="self"),
+            patch.object(federation_core, "_webhook_url_refusal", side_effect=["lookup_failed", None]),
+            patch.object(federation_core.requests, "post", return_value=resp) as post,
+            patch.object(federation_core.time, "sleep"),
+        ):
+            result = federation_core.push_file_part(fed_ws, sha256="ab", part_index=0, total=1, size=4, payload=b"data")
+        assert result["ok"] is True
+        post.assert_called_once()
+
+    def test_file_part_checks_the_host_before_its_retry(self):
+        fed_ws = SimpleNamespace(webhook_url="https://peer.example/api/federation", instance_id="fp")
+        resp = MagicMock(status_code=503)
+        resp.json.return_value = {"ok": False}
+        with (
+            patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
+            patch.object(federation_core, "get_instance_id", return_value="self"),
+            patch.object(federation_core, "_webhook_url_refusal", side_effect=[None, "refused"]),
+            patch.object(federation_core.requests, "post", return_value=resp) as post,
+            patch.object(federation_core.time, "sleep"),
+        ):
+            result = federation_core.push_file_part(fed_ws, sha256="ab", part_index=0, total=1, size=4, payload=b"data")
+        assert result is None
+        post.assert_called_once()
+
+    def test_pair_request_retries_a_failed_lookup(self):
+        _private, public_pem = _keypair()
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"ok": True}
+        with (
+            patch.object(federation_core, "get_public_url", return_value="https://this-instance.example"),
+            patch.object(federation_core, "get_or_create_instance_keypair", return_value=(_private, public_pem)),
+            patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
+            patch.object(federation_core, "get_instance_id", return_value="fp"),
+            patch.object(federation_core, "_webhook_url_refusal", side_effect=["lookup_failed", None]),
+            patch.object(federation_core.requests, "post", return_value=resp) as post,
+            patch.object(federation_core.time, "sleep"),
+        ):
+            result = federation_core.initiate_federation_connect("https://peer.example/api/federation", "FED-1")
+        assert result["ok"] is True
+        post.assert_called_once()
+
+    def test_pair_request_checks_the_host_before_its_retry(self):
+        _private, public_pem = _keypair()
+        resp = MagicMock(status_code=503)
+        resp.json.return_value = {"ok": False}
+        with (
+            patch.object(federation_core, "get_public_url", return_value="https://this-instance.example"),
+            patch.object(federation_core, "get_or_create_instance_keypair", return_value=(_private, public_pem)),
+            patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
+            patch.object(federation_core, "get_instance_id", return_value="fp"),
+            patch.object(federation_core, "_webhook_url_refusal", side_effect=[None, "refused"]),
+            patch.object(federation_core.requests, "post", return_value=resp) as post,
+            patch.object(federation_core.time, "sleep"),
+        ):
+            result = federation_core.initiate_federation_connect("https://peer.example/api/federation", "FED-1")
+        assert result is None
+        post.assert_called_once()
 
 
 class TestEmptyUrlDm:
@@ -529,8 +666,8 @@ class TestFedWsCacheInvalidation:
             patch.object(federation_api.federation, "get_or_create_instance", return_value=fed_ws),
             patch.object(federation_api.federation, "get_or_create_instance_keypair", return_value=(None, "our-pem")),
             patch.object(federation_api.federation, "get_instance_id", return_value="b" * 64),
-            patch.object(federation_api.federation, "push_allowed_workspaces", return_value={"ok": True}),
-            patch("federation.replicate.replicate_peer_snapshot"),
+            patch.object(federation_api.federation, "push_allowed_workspaces", return_value={"ok": True}) as push,
+            patch("federation.replicate.replicate_peer_snapshot") as snapshot,
             patch.object(
                 federation_api.DbManager,
                 "find_records",
@@ -554,6 +691,126 @@ class TestFedWsCacheInvalidation:
         assert status == 200
         assert resp.get("ok") is True
         inv.assert_called_once_with()
+        push.assert_not_called()
+        snapshot.assert_not_called()
+
+    def _pair_request(self, body: dict):
+        from federation import api as federation_api
+
+        return federation_api.handle_pair(
+            body,
+            json.dumps(body),
+            {
+                "X-Federation-Signature": "sig",
+                "X-Federation-Timestamp": "1",
+                "X-Federation-Instance": body["instance_id"],
+            },
+        )
+
+    def test_pair_retry_after_the_code_is_used_returns_ok(self):
+        from federation import api as federation_api
+
+        body = {
+            "code": "FED-ABCD1234",
+            "webhook_url": "https://peer.example/api/federation",
+            "instance_id": "a" * 64,
+            "public_key": "pem",
+        }
+        saved = SimpleNamespace(
+            instance_id=body["instance_id"],
+            public_key="pem",
+            status="active",
+            trust_status="trusted",
+        )
+        with (
+            patch.object(federation_api.federation, "federation_verify", return_value=True),
+            patch.object(federation_api.federation, "instance_id_matches_public_key", return_value=True),
+            patch.object(federation_api.federation, "get_instance_id", return_value="b" * 64),
+            patch.object(federation_api.federation, "get_or_create_instance_keypair", return_value=(None, "our-pem")),
+            patch.object(federation_api.federation, "get_or_create_instance") as create,
+            patch.object(federation_api.DbManager, "find_records", side_effect=[[], [saved]]),
+            patch.object(federation_api.DbManager, "update_records") as update,
+        ):
+            status, resp = self._pair_request(body)
+        assert status == 200
+        assert resp["ok"] is True
+        assert resp["public_key"] == "our-pem"
+        create.assert_not_called()
+        update.assert_not_called()
+        assert saved.trust_status == "trusted"
+
+    def test_unknown_code_without_a_saved_peer_stays_unknown(self):
+        from federation import api as federation_api
+
+        body = {
+            "code": "FED-ABCD1234",
+            "webhook_url": "https://peer.example/api/federation",
+            "instance_id": "a" * 64,
+            "public_key": "pem",
+        }
+        with (
+            patch.object(federation_api.federation, "federation_verify", return_value=True),
+            patch.object(federation_api.federation, "instance_id_matches_public_key", return_value=True),
+            patch.object(federation_api.federation, "get_instance_id", return_value="b" * 64),
+            patch.object(federation_api.DbManager, "find_records", side_effect=[[], []]),
+        ):
+            status, resp = self._pair_request(body)
+        assert status == 404
+        assert resp == {"message": "Not Found"}
+
+    def test_used_code_with_a_different_public_key_stays_unknown(self):
+        from federation import api as federation_api
+
+        body = {
+            "code": "FED-ABCD1234",
+            "webhook_url": "https://peer.example/api/federation",
+            "instance_id": "a" * 64,
+            "public_key": "pem",
+        }
+        saved = SimpleNamespace(
+            instance_id=body["instance_id"],
+            public_key="other-pem",
+            status="active",
+            trust_status="trusted",
+        )
+        with (
+            patch.object(federation_api.federation, "federation_verify", return_value=True),
+            patch.object(federation_api.federation, "instance_id_matches_public_key", return_value=True),
+            patch.object(federation_api.federation, "get_instance_id", return_value="b" * 64),
+            patch.object(federation_api.DbManager, "find_records", side_effect=[[], [saved]]),
+        ):
+            status, resp = self._pair_request(body)
+        assert status == 404
+        assert resp == {"message": "Not Found"}
+
+    def test_used_code_from_an_untrusted_peer_stays_unknown(self):
+        from federation import api as federation_api
+
+        body = {
+            "code": "FED-ABCD1234",
+            "webhook_url": "https://peer.example/api/federation",
+            "instance_id": "a" * 64,
+            "public_key": "pem",
+        }
+        saved = SimpleNamespace(
+            instance_id=body["instance_id"],
+            public_key="pem",
+            status="active",
+            trust_status="untrusted",
+        )
+        with (
+            patch.object(federation_api.federation, "federation_verify", return_value=True),
+            patch.object(federation_api.federation, "instance_id_matches_public_key", return_value=True),
+            patch.object(federation_api.federation, "get_instance_id", return_value="b" * 64),
+            patch.object(federation_api.federation, "get_or_create_instance") as create,
+            patch.object(federation_api.DbManager, "find_records", side_effect=[[], [saved]]),
+            patch.object(federation_api.DbManager, "update_records") as update,
+        ):
+            status, resp = self._pair_request(body)
+        assert status == 404
+        assert resp == {"message": "Not Found"}
+        create.assert_not_called()
+        update.assert_not_called()
 
     def test_inbound_pair_rejects_connection_blob_as_code(self):
         from federation import api as federation_api
@@ -576,6 +833,55 @@ class TestFedWsCacheInvalidation:
         )
         assert status == 400
         assert resp == {"error": "code_too_long"}
+
+    def test_peer_accepted_rejects_this_install(self):
+        from unittest.mock import MagicMock
+
+        from federation import api as federation_api
+
+        self_row = SimpleNamespace(status="active", trust_status="trusted", private_key_encrypted="cipher")
+        peer = SimpleNamespace(status="active", trust_status="trusted", private_key_encrypted=None)
+        assert federation_api._peer_accepted(self_row) is False
+        assert federation_api._peer_accepted(peer) is True
+        assert federation_api._peer_accepted(MagicMock(status="active", trust_status="trusted")) is True
+
+    def test_inbound_pair_refuses_this_install(self):
+        from federation import api as federation_api
+
+        body = {
+            "code": "FED-ABCD1234",
+            "webhook_url": "https://peer.example/api/federation",
+            "instance_id": "a" * 64,
+            "public_key": "pem",
+        }
+        with (
+            patch.object(federation_api.federation, "federation_verify", return_value=True),
+            patch.object(federation_api.federation, "instance_id_matches_public_key", return_value=True),
+            patch.object(federation_api.federation, "get_instance_id", return_value=body["instance_id"]),
+            patch.object(federation_api.DbManager, "update_records") as update,
+            patch.object(federation_api.DbManager, "find_records") as find,
+        ):
+            status, resp = federation_api.handle_pair(
+                body,
+                json.dumps(body),
+                {
+                    "X-Federation-Signature": "sig",
+                    "X-Federation-Timestamp": "1",
+                    "X-Federation-Instance": body["instance_id"],
+                },
+            )
+        assert status == 400
+        assert resp == {"error": "self_pair"}
+        update.assert_not_called()
+        find.assert_not_called()
+
+    def test_mark_peer_untrusted_ignores_this_install(self):
+        from helpers.workspace_kind import mark_peer_untrusted
+
+        self_row = SimpleNamespace(instance_id="a" * 64, private_key_encrypted="cipher")
+        with patch("helpers.workspace_kind.DbManager.update_records") as update:
+            mark_peer_untrusted(self_row)
+        update.assert_not_called()
 
     def test_invalidate_helper_deletes_prefix(self):
         from helpers.workspace import invalidate_fed_ws_for_sync_cache
@@ -629,6 +935,7 @@ class TestExternalConnectionModals:
         with (
             patch("handlers.federation_cmds.helpers.federation_enabled", return_value=True),
             patch("handlers.federation_cmds.federation.parse_federation_code", return_value=payload),
+            patch("handlers.federation_cmds.DbManager.get_record", return_value=None),
             patch("handlers.federation_cmds._local_workspace_options", return_value=[]),
         ):
             result = handle_join_external_connection_submit_ack(body, MagicMock(), {})
@@ -643,6 +950,74 @@ class TestExternalConnectionModals:
         assert "Team ID: `TPRIMARY`" in text
         assert "Remote HQ" not in text
         assert "https://peer.example/api/federation" in text
+
+    def test_join_ack_refuses_this_installs_code(self):
+        from handlers.federation_cmds import handle_join_external_connection_submit_ack
+
+        payload = {
+            "code": "FED-ABCD",
+            "webhook_url": "https://ws-a.example/api/federation",
+            "instance_id": "a" * 64,
+        }
+        body = {
+            "view": {
+                "state": {
+                    "values": {"join_external_connection_code": {"join_external_connection_code": {"value": "ENCODED"}}}
+                }
+            }
+        }
+        self_row = SimpleNamespace(instance_id="a" * 64, private_key_encrypted="cipher")
+        with (
+            patch("handlers.federation_cmds.helpers.federation_enabled", return_value=True),
+            patch("handlers.federation_cmds.federation.parse_federation_code", return_value=payload),
+            patch("handlers.federation_cmds.DbManager.get_record", return_value=self_row),
+        ):
+            result = handle_join_external_connection_submit_ack(body, MagicMock(), {})
+        assert result["response_action"] == "errors"
+        assert "this SyncBot instance" in result["errors"]["join_external_connection_code"]
+
+    def test_join_review_refuses_a_different_response_key(self):
+        from handlers.federation_cmds import handle_join_external_connection_review
+
+        _, code_pem = _keypair()
+        _, other_pem = _keypair()
+        code_id = federation_core.public_key_fingerprint(code_pem)
+        payload = {
+            "code": "FED-ABCD1234",
+            "webhook_url": "https://peer.example/api/federation",
+            "instance_id": code_id,
+            "public_key": code_pem,
+            "label": "Partner Org",
+        }
+        body = {
+            "user": {"id": "U1"},
+            "team": {"id": "T1"},
+            "view": {
+                "private_metadata": json.dumps({"code": "ENCODED"}),
+                "state": {
+                    "values": {
+                        "select_join_external_workspaces": {
+                            "select_join_external_workspaces": {"selected_options": [{"value": "1"}]}
+                        }
+                    }
+                },
+            },
+        }
+        workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
+        with (
+            patch("handlers.federation_cmds.helpers.federation_enabled", return_value=True),
+            patch("handlers.federation_cmds._require_primary_admin", return_value=workspace),
+            patch("handlers.federation_cmds.federation.parse_federation_code", return_value=payload),
+            patch(
+                "handlers.federation_cmds.federation.initiate_federation_connect",
+                return_value={"ok": True, "public_key": other_pem},
+            ),
+            patch("handlers.federation_cmds.federation.get_or_create_instance") as create,
+            patch("handlers.federation_cmds._dm_actor"),
+            patch("handlers.federation_cmds._close_modal_done"),
+        ):
+            handle_join_external_connection_review(body, MagicMock(), MagicMock(), {})
+        create.assert_not_called()
 
     def test_create_ack_keeps_modal_open(self):
         from handlers._common import _DM_WAIT_TEXT
@@ -708,12 +1083,14 @@ class TestExternalConnectionModals:
         assert result["response_action"] == "errors"
         assert "select_join_external_workspaces" in result["errors"]
 
-    def test_create_ack_preserves_request_id(self):
+    def test_create_ack_ignores_older_request_metadata(self):
         from handlers.federation_cmds import handle_create_external_connection_submit_ack
 
         body = {
             "view": {
-                "private_metadata": json.dumps({"request_id": 9, "exclude_workspace_id": 10}),
+                "private_metadata": json.dumps(
+                    {"request_id": 9, "exclude_workspace_id": 10, "allow_empty_allowlist": True}
+                ),
                 "state": {
                     "values": {
                         "create_external_connection_name": {
@@ -729,10 +1106,27 @@ class TestExternalConnectionModals:
         with patch("handlers.federation_cmds.helpers.federation_enabled", return_value=True):
             result = handle_create_external_connection_submit_ack(body, MagicMock(), {})
         meta = json.loads(result["view"]["private_metadata"])
-        assert meta["request_id"] == 9
-        assert meta["exclude_workspace_id"] == 10
-        assert meta["workspace_ids"] == [1]
-        assert 10 not in meta["workspace_ids"]
+        assert meta == {"label": "Partner Org", "workspace_ids": [1]}
+
+    def test_create_ack_requires_a_workspace(self):
+        from handlers.federation_cmds import handle_create_external_connection_submit_ack
+
+        body = {
+            "view": {
+                "private_metadata": json.dumps({"allow_empty_allowlist": True}),
+                "state": {
+                    "values": {
+                        "create_external_connection_name": {
+                            "create_external_connection_name": {"value": "Partner Org"}
+                        },
+                    }
+                },
+            }
+        }
+        with patch("handlers.federation_cmds.helpers.federation_enabled", return_value=True):
+            result = handle_create_external_connection_submit_ack(body, MagicMock(), {})
+        assert result["response_action"] == "errors"
+        assert "Select at least one Workspace." in result["errors"]["select_create_external_workspaces"]
 
     def test_workspaces_block_uses_multi_select(self):
         from handlers.federation_cmds import _workspaces_block
@@ -819,10 +1213,9 @@ class TestExternalConnectionModals:
         assert generate.call_args.kwargs["workspace_ids"] == [10]
         assert "workspaces" not in generate.call_args.kwargs
 
-    def test_create_submit_from_request_sets_subject_and_fulfills(self):
+    def test_create_submit_ignores_older_request_metadata(self):
         from handlers.federation_cmds import handle_create_external_connection_submit
 
-        request = SimpleNamespace(id=9, status="pending", subject_team_id="T_SRC")
         body = {
             "user": {"id": "U_ADMIN"},
             "team": {"id": "T1"},
@@ -834,41 +1227,27 @@ class TestExternalConnectionModals:
                         "workspace_ids": [1, 10],
                         "request_id": 9,
                         "exclude_workspace_id": 10,
+                        "allow_empty_allowlist": True,
                     }
                 ),
                 "state": {"values": {}},
             },
         }
         workspace = SimpleNamespace(id=1, team_id="T1")
-        order: list[str] = []
-
-        def track_modal(*_args, **_kwargs):
-            order.append("modal")
-
-        def track_fulfill(*_args, **_kwargs):
-            order.append("fulfill")
-
         with (
             patch("handlers.federation_cmds.helpers.federation_enabled", return_value=True),
             patch("handlers.federation_cmds._require_primary_admin", return_value=workspace),
-            patch("handlers.federation_cmds.DbManager.get_record", return_value=request),
             patch("handlers.federation_cmds.federation.get_public_url", return_value="https://me.example"),
             patch(
                 "handlers.federation_cmds.federation.generate_federation_code",
                 return_value=("ENCODED", "FED-1"),
             ) as generate,
-            patch("handlers.export_import.fulfill_pairing_request", side_effect=track_fulfill) as fulfill,
-            patch("handlers.federation_cmds._update_connection_code_modal", side_effect=track_modal),
+            patch("handlers.federation_cmds._update_connection_code_modal"),
             patch("handlers.federation_cmds.builders.refresh_home_tab_for_workspace"),
         ):
             handle_create_external_connection_submit(body, MagicMock(), MagicMock(), {})
-        assert generate.call_args.kwargs["subject_team_id"] == "T_SRC"
-        assert generate.call_args.kwargs["workspace_ids"] == [1]
-        fulfill.assert_called_once()
-        assert fulfill.call_args.args[0] is request
-        assert fulfill.call_args.kwargs["encoded"] == "ENCODED"
-        assert fulfill.call_args.kwargs["raw_code"] == "FED-1"
-        assert order == ["modal", "fulfill"]
+        assert "subject_team_id" not in generate.call_args.kwargs
+        assert generate.call_args.kwargs["workspace_ids"] == [1, 10]
 
     def test_edit_pending_opens_edit_modal(self):
         from handlers.federation_cmds import handle_edit_pending_external_connection

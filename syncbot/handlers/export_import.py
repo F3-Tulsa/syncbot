@@ -2,7 +2,6 @@
 
 import json
 import logging
-import os
 from datetime import UTC, datetime
 from logging import Logger
 
@@ -15,25 +14,11 @@ from db import DbManager, schemas
 from handlers._common import _close_modal_done, _update_wait_modal, _wait_modal_ack
 from helpers import export_import as ei
 from helpers.workspace import invalidate_fed_ws_for_sync_cache
-from logger import log_debug, log_error, log_warning
+from logger import log_error, log_warning
 from slack import actions, orm
 
 # Uploaded JSON (backup / migration) download timeout — size follows Slack's per-file max.
 _UPLOAD_DOWNLOAD_TIMEOUT = 10
-
-
-def _primary_workspace_code_tick() -> str:
-    """Primary Workspace name in code ticks, or ``Not set``."""
-    team_id = (os.environ.get(constants.PRIMARY_WORKSPACE) or "").strip()
-    if not team_id:
-        return "`Not set`"
-    matches = DbManager.find_records(
-        schemas.Workspace,
-        [schemas.Workspace.team_id == team_id, schemas.Workspace.deleted_at.is_(None)],
-    )
-    if not matches:
-        return f"`{team_id}`"
-    return f"`{helpers.resolve_workspace_name(matches[0]) or team_id}`"
 
 
 def _download_uploaded_file(file_url: str, token: str) -> tuple[str | None, str | None]:
@@ -41,11 +26,19 @@ def _download_uploaded_file(file_url: str, token: str) -> tuple[str | None, str 
     import urllib.error
     import urllib.request
 
-    from helpers.files import max_file_bytes
+    from helpers.files import is_slack_file_url, max_file_bytes
 
+    if not is_slack_file_url(file_url):
+        return None, "Failed to download the uploaded file."
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect)
     req = urllib.request.Request(file_url, headers={"Authorization": f"Bearer {token}"})
     try:
-        with urllib.request.urlopen(req, timeout=_UPLOAD_DOWNLOAD_TIMEOUT) as resp:
+        with opener.open(req, timeout=_UPLOAD_DOWNLOAD_TIMEOUT) as resp:
             chunks: list[bytes] = []
             total = 0
             limit = max_file_bytes()
@@ -59,13 +52,13 @@ def _download_uploaded_file(file_url: str, token: str) -> tuple[str | None, str 
                 chunks.append(chunk)
             raw = b"".join(chunks)
     except urllib.error.HTTPError as e:
-        log_error("upload_download_http_error", error=str(e), exc_info=True)
+        log_error("upload_download_http_error", error_type=type(e).__name__, exc_info=True)
         return None, "Failed to download the uploaded file."
     except TimeoutError as e:
-        log_error("upload_download_timeout", error=str(e), exc_info=True)
+        log_error("upload_download_timeout", error_type=type(e).__name__, exc_info=True)
         return None, "Failed to download the uploaded file."
     except OSError as e:
-        log_error("upload_download_failed", error=str(e), exc_info=True)
+        log_error("upload_download_failed", error_type=type(e).__name__, exc_info=True)
         return None, "Failed to download the uploaded file."
     try:
         return raw.decode("utf-8"), None
@@ -426,8 +419,8 @@ def handle_data_migration(
         orm.SectionBlock(
             label=(
                 "*Export*\n"
-                "Download this Workspace's SyncBot data (Groups, Syncs and Mappings, no tokens or secrets) "
-                "as a JSON file. The file will be sent to you from SyncBot as a DM."
+                "Save this Workspace's Groups, Syncs, and user mappings to a file. "
+                "SyncBot sends it to you in a DM. The file has no tokens or passwords."
             ),
         ),
         orm.ActionsBlock(
@@ -439,34 +432,15 @@ def handle_data_migration(
             ],
         ),
     ]
-    if helpers.federation_enabled():
-        primary = _primary_workspace_code_tick()
-        export_blocks.extend(
-            [
-                orm.SectionBlock(
-                    label=(
-                        "*Export and Request Connection*\n"
-                        f"Download a JSON export file, plus a request sent to the admins of {primary} "
-                        "to bundle an External Connection code with the export. Use this when you are "
-                        "moving this Workspace to a new SyncBot instance that is not connected yet. "
-                        "You will get the download file after an admin approves the request."
-                    ),
-                ),
-                orm.ActionsBlock(
-                    elements=[
-                        orm.ButtonElement(
-                            label=":link: Export and Request Connection",
-                            action=actions.CONFIG_DATA_MIGRATION_REQUEST,
-                        ),
-                    ],
-                ),
-            ]
-        )
     export_blocks.extend(
         [
             orm.DividerBlock(),
             orm.SectionBlock(
-                label="*Import*\nUpload a JSON export file. Existing Groups and Syncs are merged.",
+                label=(
+                    "*Import*\n"
+                    "Upload a file exported from this instance or from a connected instance. "
+                    "You will see what is in it before anything changes."
+                ),
             ),
         ]
     )
@@ -524,7 +498,7 @@ def handle_data_migration_export(
         dm=True,
     )
     try:
-        payload = ei.build_migration_export(workspace_record.id, include_source_instance=False)
+        payload = ei.build_migration_export(workspace_record.id)
         json_str = json.dumps(payload, default=ei._json_serializer, indent=2)
         dm_channel = _open_dm_channel(client, user_id)
         client.files_upload_v2(
@@ -543,239 +517,6 @@ def handle_data_migration_export(
             body,
             ":warning: SyncBot could not send the migration file. Try Export again.",
         )
-
-
-def _request_id_from_action(body: dict, prefix: str) -> int | None:
-    action = helpers.safe_get(body, "actions", 0) or {}
-    raw = str(action.get("value") or str(action.get("action_id") or "").removeprefix(prefix + "_"))
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
-
-
-def _dm_migration_requester(request: schemas.FederationPairingRequest, text: str) -> WebClient | None:
-    workspace = DbManager.get_record(schemas.Workspace, id=request.subject_team_id)
-    if not workspace or workspace.deleted_at is not None or not helpers.get_bot_token(workspace):
-        return None
-    try:
-        workspace_client = WebClient(token=helpers.get_bot_token(workspace))
-        channel = _open_dm_channel(workspace_client, request.requested_by_user_id)
-        workspace_client.chat_postMessage(channel=channel, text=text)
-        return workspace_client
-    except Exception:
-        log_error("migration_requester_dm_failed", request_id=request.id, exc_info=True)
-        return None
-
-
-def handle_data_migration_request(
-    body: dict,
-    client: WebClient,
-    logger: Logger,
-    context: dict,
-) -> None:
-    """Request a primary-admin-approved pairing code for this Workspace export."""
-    if not helpers.federation_enabled():
-        return
-    user_id = helpers.get_user_id_from_body(body)
-    team_id = helpers.get_team_id_from_body(body)
-    if not user_id or not team_id or not _is_admin(client, user_id, body):
-        return
-    workspace = helpers.get_workspace_record(team_id, body, context, client)
-    primary_tick = _primary_workspace_code_tick()
-    pending = DbManager.find_records(
-        schemas.FederationPairingRequest,
-        [
-            schemas.FederationPairingRequest.subject_team_id == team_id,
-            schemas.FederationPairingRequest.status == "pending",
-        ],
-    )
-    if pending:
-        already = (
-            f":outbox_tray: A request to export data and create a remote connection is already waiting "
-            f"for admins in {primary_tick}."
-        )
-        _dm_migration_requester(pending[0], already)
-        _close_modal_done(client, body, f"{already} You can close this now.")
-        return
-    request = DbManager.create_record(
-        schemas.FederationPairingRequest(
-            subject_team_id=team_id,
-            requested_by_user_id=user_id,
-            requested_at=datetime.now(UTC),
-            status="pending",
-        )
-    )
-    primary_team_id = (os.environ.get(constants.PRIMARY_WORKSPACE) or "").strip()
-    primary = DbManager.get_record(schemas.Workspace, id=primary_team_id) if primary_team_id else None
-    if not primary or primary.deleted_at is not None or not helpers.get_bot_token(primary):
-        unreachable = f":warning: SyncBot could not reach the admins in {primary_tick}. You can still use Export."
-        _dm_migration_requester(request, unreachable)
-        _close_modal_done(client, body, unreachable)
-        return
-    primary_client = WebClient(token=helpers.get_bot_token(primary))
-    display_name, _ = helpers.get_user_info(client, user_id)
-    source_name = helpers.resolve_workspace_name(workspace) or team_id
-    requester = helpers.code_ticked_display_name(display_name, source_name)
-    text = f":globe_with_meridians: {requester} requested to export data and create a remote connection."
-    blocks = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": text}},
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": ":globe_with_meridians: Approve and Create"},
-                    "action_id": f"{actions.CONFIG_PAIRING_REQUEST_APPROVE}_{request.id}",
-                    "value": str(request.id),
-                    "style": "primary",
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": ":eject: Decline"},
-                    "action_id": f"{actions.CONFIG_PAIRING_REQUEST_DECLINE}_{request.id}",
-                    "value": str(request.id),
-                    "style": "danger",
-                },
-            ],
-        },
-    ]
-    helpers.notify_admins_dm(
-        primary_client,
-        text,
-        blocks=blocks,
-        include_managers=False,
-        team_id=primary.team_id,
-    )
-    _dm_migration_requester(
-        request,
-        f":outbox_tray: Your request to export data and create a remote connection has been sent to admins in the {primary_tick} workspace.",
-    )
-    _close_modal_done(
-        client,
-        body,
-        f":outbox_tray: A DM was sent to admins in {primary_tick}. You can close this now.",
-    )
-
-
-def handle_pairing_request_approve(
-    body: dict,
-    client: WebClient,
-    logger: Logger,
-    context: dict,
-) -> None:
-    """Open Create Connection so the primary admin can name it and pick Workspaces."""
-    user_id = helpers.get_user_id_from_body(body)
-    team_id = helpers.get_team_id_from_body(body)
-    request_id = _request_id_from_action(body, actions.CONFIG_PAIRING_REQUEST_APPROVE)
-    if (
-        not user_id
-        or not request_id
-        or not helpers.is_primary_workspace(team_id)
-        or not helpers.is_workspace_admin(client, user_id)
-    ):
-        return
-    request = DbManager.get_record(schemas.FederationPairingRequest, id=request_id)
-    if not request or request.status != "pending":
-        return
-    workspace = DbManager.get_record(schemas.Workspace, id=request.subject_team_id)
-    if not workspace:
-        return
-    from handlers.federation_cmds import open_create_external_connection_modal
-
-    leaving = helpers.resolve_workspace_name(workspace) or workspace.team_id
-    open_create_external_connection_modal(
-        body,
-        client,
-        request_id=request.id,
-        exclude_workspace_id=workspace.id if getattr(workspace, "id", None) else None,
-        initial_name=leaving,
-        leaving_workspace_name=leaving,
-    )
-
-
-def fulfill_pairing_request(
-    request: schemas.FederationPairingRequest,
-    *,
-    encoded: str,
-    raw_code: str,
-    resolved_by_user_id: str,
-) -> None:
-    """Mark the request approved and DM the requester the signed export plus connection code."""
-    workspace = DbManager.get_record(schemas.Workspace, id=request.subject_team_id)
-    if not workspace:
-        return
-    code_rows = DbManager.find_records(
-        schemas.FederationPairingCode,
-        [schemas.FederationPairingCode.code == raw_code],
-    )
-    payload = ei.build_migration_export(
-        workspace.id,
-        include_source_instance=True,
-        connection_code=encoded,
-    )
-    DbManager.update_records(
-        schemas.FederationPairingRequest,
-        [schemas.FederationPairingRequest.id == request.id],
-        {
-            schemas.FederationPairingRequest.status: "approved",
-            schemas.FederationPairingRequest.resolved_by_user_id: resolved_by_user_id or None,
-            schemas.FederationPairingRequest.resolved_at: datetime.now(UTC),
-            schemas.FederationPairingRequest.pairing_code_id: code_rows[0].id if code_rows else None,
-        },
-    )
-    workspace_client = _dm_migration_requester(
-        request,
-        f":white_check_mark: Admins in {_primary_workspace_code_tick()} approved your request "
-        "to export data and create a remote connection.",
-    )
-    if workspace_client:
-        workspace_client.files_upload_v2(
-            content=json.dumps(payload, default=ei._json_serializer, indent=2),
-            filename=f"syncbot-migration-{workspace.team_id}-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}.json",
-            channel=_open_dm_channel(workspace_client, request.requested_by_user_id),
-            initial_comment=(
-                f":outbox_tray: Your migration file for "
-                f"`{helpers.resolve_workspace_name(workspace) or workspace.team_id}` "
-                "includes a 24-hour connection code. Use it on the new instance to Join the connection."
-            ),
-        )
-
-
-def handle_pairing_request_decline(
-    body: dict,
-    client: WebClient,
-    logger: Logger,
-    context: dict,
-) -> None:
-    """Decline a pending migration pairing request and notify its requester."""
-    user_id = helpers.get_user_id_from_body(body)
-    team_id = helpers.get_team_id_from_body(body)
-    request_id = _request_id_from_action(body, actions.CONFIG_PAIRING_REQUEST_DECLINE)
-    if (
-        not user_id
-        or not request_id
-        or not helpers.is_primary_workspace(team_id)
-        or not helpers.is_workspace_admin(client, user_id)
-    ):
-        return
-    request = DbManager.get_record(schemas.FederationPairingRequest, id=request_id)
-    if not request or request.status != "pending":
-        return
-    DbManager.update_records(
-        schemas.FederationPairingRequest,
-        [schemas.FederationPairingRequest.id == request.id],
-        {
-            schemas.FederationPairingRequest.status: "declined",
-            schemas.FederationPairingRequest.resolved_by_user_id: user_id,
-            schemas.FederationPairingRequest.resolved_at: datetime.now(UTC),
-        },
-    )
-    _dm_migration_requester(
-        request,
-        f":eject: Admins in {_primary_workspace_code_tick()} declined your request "
-        "to export data and create a remote connection. You can still use Export for the file only.",
-    )
 
 
 def _data_migration_prepare(
@@ -881,11 +622,14 @@ def _data_migration_prepare(
 
     workspace_record = helpers.get_workspace_record(team_id, body, context, client)
     if not workspace_record or workspace_record.team_id != export_team_id:
+        file_name = str(workspace_payload.get("workspace_name") or "").strip() or str(export_team_id)
         return (
             {
                 "response_action": "errors",
                 "errors": {
-                    actions.CONFIG_DATA_MIGRATION_JSON_INPUT: "This migration file is for a different workspace. Open the app from the workspace that matches the migration file."
+                    actions.CONFIG_DATA_MIGRATION_JSON_INPUT: (
+                        f"This file is for `{file_name}`. Open SyncBot in that Workspace to import it."
+                    )
                 },
             },
             None,
@@ -895,10 +639,14 @@ def _data_migration_prepare(
         )
 
     team_id_to_workspace_id = {workspace_record.team_id: workspace_record.id}
-    workspaces_b = DbManager.find_records(schemas.Workspace, [])
-    for w in workspaces_b:
-        if w.team_id:
-            team_id_to_workspace_id[w.team_id] = w.id
+    for row in DbManager.find_records(
+        schemas.Workspace,
+        [schemas.Workspace.deleted_at.is_(None)],
+    ):
+        if not row.team_id or row.team_id in team_id_to_workspace_id:
+            continue
+        if helpers.is_stub_workspace(row):
+            team_id_to_workspace_id[row.team_id] = row.id
 
     return None, data, 0, team_id_to_workspace_id, workspace_record
 
@@ -920,7 +668,12 @@ def _migration_message_count(post_meta: dict, sync_uid: str, channel_id: str) ->
 
 
 def _migration_overview_blocks(data: dict) -> list:
-    """Home-style Group / sync / mapping / message counts from migration JSON."""
+    """*File contents*, then one code block per Group with Home's labels.
+
+    Synced Channels are this Workspace's own Channels in that Group's Syncs.
+    Mapped Users are the file's mappings for that Group. Synced Messages count
+    every Channel in those Syncs.
+    """
     from slack.blocks import section
 
     groups = [item for item in (data.get("groups") or []) if isinstance(item, dict)]
@@ -928,138 +681,44 @@ def _migration_overview_blocks(data: dict) -> list:
     channels = [item for item in (data.get("sync_channels") or []) if isinstance(item, dict)]
     mappings = [item for item in (data.get("user_mappings") or []) if isinstance(item, dict)]
     post_meta = data.get("post_meta") if isinstance(data.get("post_meta"), dict) else {}
+    workspace = data.get("workspace") if isinstance(data.get("workspace"), dict) else {}
+    this_team_id = str(workspace.get("team_id") or "")
     channels_by_sync: dict[str, list] = {}
     for channel in channels:
         uid = str(channel.get("sync_uid") or "")
         if uid:
             channels_by_sync.setdefault(uid, []).append(channel)
-    mapped_count = len(mappings)
-    blocks = [section("*This file will import*")]
     if not groups:
-        blocks.append(
-            section(
-                f"No Workspace Groups.\nMapped Users: `{mapped_count}`\n"
-                f"Synced Channels: `{len(channels)}`\nSynced Messages: "
-                f"`{sum(_migration_message_count(post_meta, str(s.get('uid') or ''), str(c.get('channel_id') or '')) for s in syncs for c in channels_by_sync.get(str(s.get('uid') or ''), []))}`"
-            )
-        )
-        return blocks
+        return [section("This file has no Groups.")]
+    blocks = [section("*File contents*")]
     for group in groups:
         uid = str(group.get("uid") or "")
         name = str(group.get("name") or "Unnamed group").strip() or "Unnamed group"
-        group_syncs = [item for item in syncs if str(item.get("group_uid") or "") == uid]
-        titles = [str(item.get("title") or "").strip() for item in group_syncs if str(item.get("title") or "").strip()]
-        channel_count = 0
+        own_channels: list[str] = []
         message_count = 0
-        for sync in group_syncs:
+        for sync in syncs:
+            if str(sync.get("group_uid") or "") != uid:
+                continue
             sync_uid = str(sync.get("uid") or "")
-            sync_channels = channels_by_sync.get(sync_uid, [])
-            channel_count += len(sync_channels)
-            for channel in sync_channels:
-                message_count += _migration_message_count(post_meta, sync_uid, str(channel.get("channel_id") or ""))
-        title_line = ", ".join(f"`{title}`" for title in titles) if titles else "`None`"
-        blocks.append(
-            section(
-                f"*{name}*\n"
-                f"Synced Channels: `{channel_count}` {title_line}\n"
-                f"Mapped Users: `{mapped_count}`\n"
-                f"Synced Messages: `{message_count}`"
-            )
-        )
+            for channel in channels_by_sync.get(sync_uid, []):
+                channel_id = str(channel.get("channel_id") or "")
+                message_count += _migration_message_count(post_meta, sync_uid, channel_id)
+                if str(channel.get("team_id") or "") == this_team_id:
+                    channel_name = str(channel.get("channel_name") or "").strip().removeprefix("#")
+                    own_channels.append(f"#{channel_name or channel_id}")
+        channel_line = f"Synced Channels: {len(own_channels)}"
+        if own_channels:
+            channel_line += f" ({', '.join(own_channels)})"
+        mapped_count = sum(1 for item in mappings if str(item.get("group_uid") or "") == uid)
+        lines = [
+            f"Group Name: {name}",
+            channel_line,
+            f"Mapped Users: {mapped_count}",
+            f"Synced Messages: {message_count}",
+        ]
+        text = "\n".join(lines).replace("`", "'")
+        blocks.append(section(f"```{text}```"))
     return blocks
-
-
-def _ensure_migration_connection(
-    data: dict,
-    workspace_record,
-    context: dict,
-) -> None:
-    """Join from the bundled connection code, or attach locally if already paired."""
-    source = data.get("source_instance")
-    if not source:
-        return
-    encoded = source.get("connection_code")
-    if not encoded:
-        log_debug(
-            "federation_pair",
-            direction="outbound",
-            ok=False,
-            reason="no_connection_code",
-            team_id=workspace_record.team_id,
-            peer_instance_id=source.get("instance_id"),
-        )
-        return
-    from federation import core as federation
-
-    parsed = federation.parse_federation_code(encoded)
-    if not parsed:
-        log_warning(
-            "federation_pair",
-            direction="outbound",
-            ok=False,
-            reason="invalid_connection_code",
-            team_id=workspace_record.team_id,
-            peer_instance_id=source.get("instance_id"),
-        )
-        return
-    remote_instance_id = parsed["instance_id"]
-    existing = DbManager.find_records(
-        schemas.Instance,
-        [
-            schemas.Instance.instance_id == remote_instance_id,
-            schemas.Instance.status == "active",
-        ],
-    )
-    result = None
-    if not existing:
-        result = federation.initiate_federation_connect(
-            parsed["webhook_url"],
-            parsed["code"],
-            team_id=workspace_record.team_id,
-            workspace_name=workspace_record.workspace_name or None,
-            context=context,
-        )
-        if not result or not result.get("ok"):
-            log_warning(
-                "federation_pair",
-                direction="outbound",
-                ok=False,
-                reason="connect_failed_using_blob",
-                team_id=workspace_record.team_id,
-                peer_instance_id=remote_instance_id,
-            )
-    remote_team_id = result.get("team_id") if result and isinstance(result.get("team_id"), str) else None
-    remote_workspace_name = None
-    if result and isinstance(result.get("workspace_name"), str):
-        remote_workspace_name = result.get("workspace_name")
-    if remote_team_id:
-        remote_team_id = remote_team_id.strip() or None
-    remote_name = (parsed.get("label") or "").strip() or f"Connection {remote_instance_id[:8]}"
-    primary_name = (parsed.get("primary_workspace_name") or "").strip() or None
-    primary_team = (parsed.get("primary_team_id") or "").strip() or None
-    fed_ws = federation.get_or_create_instance(
-        instance_id=remote_instance_id,
-        webhook_url=parsed["webhook_url"],
-        public_key=(result.get("public_key") if result else None) or parsed["public_key"],
-        name=remote_name,
-        primary_team_id=primary_team or remote_team_id,
-        primary_workspace_name=primary_name or remote_workspace_name,
-    )
-    existing_allow = DbManager.find_records(
-        schemas.FederationWorkspaceAllowlist,
-        [
-            schemas.FederationWorkspaceAllowlist.instance_id == fed_ws.instance_id,
-            schemas.FederationWorkspaceAllowlist.workspace_id == workspace_record.id,
-        ],
-    )
-    if not existing_allow:
-        DbManager.create_record(
-            schemas.FederationWorkspaceAllowlist(
-                instance_id=fed_ws.instance_id,
-                workspace_id=workspace_record.id,
-            )
-        )
-    invalidate_fed_ws_for_sync_cache()
 
 
 def _run_migration_import(
@@ -1078,10 +737,194 @@ def _run_migration_import(
         group_id,
         team_id_to_workspace_id=team_id_to_workspace_id,
     )
-    restored = helpers.get_workspace_by_id(workspace_record.id) or workspace_record
-    if getattr(restored, "team_id", None):
-        helpers.consider_migration_release(restored.team_id)
     ei.invalidate_home_tab_caches_for_team(workspace_record.team_id)
+
+
+def _remember_migration_team(
+    names_by_team: dict[str, str],
+    team_id: str,
+    workspace_name: str | None,
+    this_team_id: str,
+) -> None:
+    tid = (team_id or "").strip()
+    if not tid or tid == this_team_id:
+        return
+    name = str(workspace_name or "").strip()
+    if tid not in names_by_team:
+        names_by_team[tid] = name or tid
+    elif name and names_by_team[tid] == tid:
+        names_by_team[tid] = name
+
+
+def _migration_workspace_names_not_here(data: dict, this_team_id: str) -> list[str]:
+    """Display names of Slack teams in the file that have no Workspace row here."""
+    names_by_team: dict[str, str] = {}
+    for group in data.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        for member in group.get("member_workspaces") or []:
+            if isinstance(member, dict):
+                _remember_migration_team(
+                    names_by_team,
+                    str(member.get("team_id") or ""),
+                    member.get("workspace_name"),
+                    this_team_id,
+                )
+        for team in group.get("member_team_ids") or []:
+            _remember_migration_team(names_by_team, str(team or ""), None, this_team_id)
+    for channel in data.get("sync_channels") or []:
+        if isinstance(channel, dict):
+            _remember_migration_team(names_by_team, str(channel.get("team_id") or ""), None, this_team_id)
+    missing = []
+    for team_id, name in names_by_team.items():
+        rows = DbManager.find_records(schemas.Workspace, [schemas.Workspace.team_id == team_id])
+        if not rows:
+            missing.append(name)
+    missing.sort(key=str.lower)
+    return missing
+
+
+def _migration_groups_not_joined(data: dict, workspace_id: int) -> list[str]:
+    """Names of active Groups in the file that this Workspace is not a member of."""
+    names: list[str] = []
+    for group in data.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        uid = str(group.get("uid") or "").strip()
+        if not uid:
+            continue
+        rows = DbManager.find_records(
+            schemas.WorkspaceGroup,
+            [
+                schemas.WorkspaceGroup.uid == uid,
+                schemas.WorkspaceGroup.status == "active",
+            ],
+        )
+        if not rows:
+            continue
+        row = rows[0]
+        members = DbManager.find_records(
+            schemas.WorkspaceGroupMember,
+            [
+                schemas.WorkspaceGroupMember.group_id == row.id,
+                schemas.WorkspaceGroupMember.workspace_id == workspace_id,
+                schemas.WorkspaceGroupMember.status == "active",
+                schemas.WorkspaceGroupMember.deleted_at.is_(None),
+            ],
+        )
+        if members:
+            continue
+        name = str(getattr(row, "name", "") or group.get("name") or "").strip()
+        if name:
+            names.append(name)
+    names.sort(key=str.lower)
+    return names
+
+
+def _format_names(names: list[str]) -> str:
+    ticked = [f"`{name}`" for name in names]
+    if len(ticked) == 1:
+        return ticked[0]
+    if len(ticked) == 2:
+        return f"{ticked[0]} and {ticked[1]}"
+    return ", ".join(ticked[:-1]) + f", and {ticked[-1]}"
+
+
+def _missing_workspaces_text(names: list[str], *, finished: bool = False) -> str:
+    label = _format_names(names)
+    outcome = "were left out" if finished else "will not come over"
+    if len(names) == 1:
+        return (
+            f":warning: {label} is not on this instance yet, so its Channels {outcome}. "
+            "Import this file again once it is here."
+        )
+    return (
+        f":warning: {label} are not on this instance yet, so their Channels {outcome}. "
+        "Import this file again once they are here."
+    )
+
+
+def _left_out_groups_text(names: list[str], *, finished: bool = False) -> str:
+    label = _format_names(names)
+    if len(names) == 1:
+        left_out = ", so it was left out" if finished else ""
+        return (
+            f":warning: {label} is already on this instance, but this Workspace is not in it{left_out}. "
+            f"Ask an Owner of {label} to invite this Workspace, then import again."
+        )
+    left_out = ", so they were left out" if finished else ""
+    return (
+        f":warning: {label} are already on this instance, but this Workspace is not in them{left_out}. "
+        "Ask an Owner of each to invite this Workspace, then import again."
+    )
+
+
+def _workspace_has_pending_channels(workspace_id: int) -> bool:
+    rows = DbManager.find_records(
+        schemas.SyncChannel,
+        [
+            schemas.SyncChannel.workspace_id == workspace_id,
+            schemas.SyncChannel.deleted_at.is_(None),
+            schemas.SyncChannel.status == "pending",
+        ],
+    )
+    return bool(rows)
+
+
+def _import_finished_text(
+    data: dict,
+    workspace,
+    result: str,
+    peer,
+    *,
+    source_name: str,
+    source_kind: str,
+    has_pending: bool,
+) -> str:
+    """One message for the import's result, then anything that was left out.
+
+    With no ``pending`` Channel left, the Syncs are running, so the message
+    says that and nothing about a peer.
+    """
+    peer_name = source_name
+    if peer is not None:
+        peer_name = ei.format_migration_source_name(getattr(peer, "instance_id", "") or "", peer)
+    if has_pending and result == "waiting_for_uninstall":
+        text = (
+            ":white_check_mark: Import finished. This Workspace's Syncs show `Waiting for migration` "
+            f"until SyncBot is uninstalled from this Workspace on `{peer_name}`. They start on their own after that. "
+            "If they do not, import this file again."
+        )
+    elif has_pending and result == "unreachable":
+        text = (
+            ":warning: Import could not finish. "
+            f"SyncBot could not reach `{peer_name}` to check whether it still has this Workspace, "
+            "so its Syncs show `Waiting for migration`. Try the import again in a few minutes."
+        )
+    elif has_pending and result == "refused":
+        text = (
+            f":warning: Import could not finish. `{peer_name}` did not accept SyncBot's check, "
+            "so this Workspace's Syncs show `Waiting for migration`. "
+            f"A primary Workspace admin can check the External Connection with `{peer_name}`, "
+            "then import this file again."
+        )
+    elif result == "resumed" and source_kind == "connected":
+        text = (
+            f":white_check_mark: Import finished. SyncBot is already uninstalled from this Workspace "
+            f"on `{source_name}`, so its Syncs are running."
+        )
+    else:
+        text = ":white_check_mark: Import finished. This Workspace's Syncs are running."
+    team_id = getattr(workspace, "team_id", "") or ""
+    workspace_id = getattr(workspace, "id", None)
+    missing = _migration_workspace_names_not_here(data, team_id)
+    if missing:
+        text += " " + _missing_workspaces_text(missing, finished=True)
+    if workspace_id is not None:
+        left_out = _migration_groups_not_joined(data, workspace_id)
+        if left_out:
+            text += " " + _left_out_groups_text(left_out, finished=True)
+    return text
 
 
 def handle_data_migration_submit_ack(
@@ -1097,8 +940,16 @@ def handle_data_migration_submit_ack(
     if data is None or group_id is None or team_id_to_workspace_id is None or workspace_record is None:
         return None
 
-    source = data.get("source_instance")
-    sig_ok = ei.verify_migration_signature(data)
+    kind, signer = ei.get_migration_file_status(data)
+    if kind not in ("this_install", "connected"):
+        source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else {}
+        name = ei.format_migration_source_name(str(source.get("instance_id") or ""), signer)
+        return {
+            "response_action": "errors",
+            "errors": {actions.CONFIG_DATA_MIGRATION_JSON_INPUT: _migration_refused_text(kind, name)},
+        }
+    source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else {}
+    source_name = ei.format_migration_source_name(str(source.get("instance_id") or ""), signer)
     from helpers._cache import _cache_set
 
     _cache_set(
@@ -1108,33 +959,46 @@ def handle_data_migration_submit_ack(
             "group_id": group_id,
             "workspace_id": workspace_record.id,
             "team_id_to_workspace_id": team_id_to_workspace_id,
+            "source_name": source_name,
         },
         ttl=600,
     )
-    from federation import core as federation
-    from handlers.federation_cmds import _connection_detail_blocks
     from slack.blocks import section
 
-    parsed = None
-    if source and source.get("connection_code"):
-        parsed = federation.parse_federation_code(source["connection_code"])
     blocks = []
-    if not sig_ok and source:
+    if kind == "connected":
         blocks.append(
             section(
-                ":warning: *Integrity check failed.* The file may have been modified. "
-                "Only Import if you intentionally edited it."
+                f":package: This file was exported from this Workspace on `{source_name}`, "
+                "a connected SyncBot instance."
             )
         )
-    if parsed:
-        blocks.extend(_connection_detail_blocks(parsed))
-    elif source and source.get("connection_code"):
-        blocks.append(
-            section(
-                ":warning: The bundled connection code is invalid or expired. Import will still merge Groups and Syncs."
-            )
-        )
+    else:
+        blocks.append(section(":package: This file was exported from this Workspace on this SyncBot instance."))
     blocks.extend(_migration_overview_blocks(data))
+    missing = _migration_workspace_names_not_here(data, workspace_record.team_id)
+    if missing:
+        blocks.append(section(_missing_workspaces_text(missing)))
+    left_out = _migration_groups_not_joined(data, workspace_record.id)
+    if left_out:
+        blocks.append(section(_left_out_groups_text(left_out)))
+    if kind == "connected":
+        blocks.append(
+            section(
+                f"Importing brings over this Workspace's Groups and Syncs from `{source_name}`, "
+                f"including the other `{source_name}` Workspaces in those Groups. "
+                f"Until SyncBot is uninstalled from this Workspace on `{source_name}`, "
+                "these Syncs show `Waiting for migration`. "
+                "If it is already uninstalled there, they start right away."
+            )
+        )
+    else:
+        blocks.append(
+            section(
+                "Importing adds these Groups and Syncs back to this Workspace, and they start right away, "
+                "unless another connected instance still has SyncBot in this Workspace."
+            )
+        )
     review = orm.BlockView(blocks=blocks)
     return {
         "response_action": "update",
@@ -1147,9 +1011,48 @@ def handle_data_migration_submit_ack(
     }
 
 
-_IMPORT_DONE_TEXT = ":white_check_mark: Import finished. Migration happens after the old instance is uninstalled."
 _IMPORT_FAIL_TEXT = ":warning: Import failed. Try the import again."
 _IMPORT_EXPIRED_TEXT = ":warning: That import expired. Try the import again."
+
+
+def _migration_refused_text(kind: str, name: str) -> str:
+    if kind == "tampered":
+        return (
+            "This file was changed after it was exported, so SyncBot will not import it. "
+            "Export it again from the instance that made it."
+        )
+    if kind == "unchecked":
+        return (
+            "SyncBot cannot check this file. Export it again from this instance or from a connected instance. "
+            "A file from before 1.7.3 needs a new export."
+        )
+    if kind == "federation_off":
+        return (
+            f"This file is from `{name}`, and Federation is off. "
+            "A primary Workspace admin can turn it on in Settings."
+        )
+    if kind == "not_connected":
+        return (
+            f"This file is from `{name}`, and that connection is not active. "
+            "A primary Workspace admin can set up the External Connection again, then import this file again."
+        )
+    return (
+        f"SyncBot does not know the instance that signed this file (`{name}`). "
+        "If it came from a SyncBot instance you trust, a primary Workspace admin can connect the two instances "
+        "under External Connections, then import it again."
+    )
+
+
+def _migration_stopped_text(kind: str, name: str) -> str:
+    if kind == "federation_off":
+        return (
+            ":warning: Import stopped. Federation is off. "
+            "A primary Workspace admin can turn it on in Settings, then import this file again."
+        )
+    return (
+        f":warning: Import stopped. `{name}` is no longer connected here. "
+        "A primary Workspace admin can connect it again under External Connections, then import this file again."
+    )
 
 
 def handle_data_migration_review_ack(body: dict, client: WebClient, context: dict) -> dict | None:
@@ -1164,6 +1067,21 @@ def handle_data_migration_review_ack(body: dict, client: WebClient, context: dic
 def _notify_import_result(client: WebClient, body: dict, user_id: str | None, message: str) -> None:
     helpers.notify_user_dm(client, user_id, message)
     _close_modal_done(client, body, message)
+
+
+def _narrow_import_map(team_id_to_workspace_id: dict, workspace_record, signer) -> dict:
+    """Keep this Workspace and stubs that belong to the install that signed the file."""
+    signer_id = getattr(signer, "instance_id", None)
+    this_team = getattr(workspace_record, "team_id", None)
+    narrowed = {}
+    for team, ws_id in team_id_to_workspace_id.items():
+        if team == this_team:
+            narrowed[team] = ws_id
+            continue
+        other = helpers.get_workspace_by_id(ws_id)
+        if other is not None and getattr(other, "instance_id", None) == signer_id:
+            narrowed[team] = ws_id
+    return narrowed
 
 
 def _complete_data_migration_import(
@@ -1194,8 +1112,24 @@ def _complete_data_migration_import(
     if not workspace_record:
         _notify_import_result(client, body, user_id, _IMPORT_FAIL_TEXT)
         return
+    kind, signer = ei.get_migration_file_status(data)
+    if kind not in ("this_install", "connected"):
+        source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else {}
+        instance_id = str(source.get("instance_id") or "")
+        if signer is not None:
+            name = ei.format_migration_source_name(instance_id, signer)
+        else:
+            name = meta.get("source_name") or ei.format_migration_source_name(instance_id, None)
+        _notify_import_result(client, body, user_id, _migration_stopped_text(kind, name))
+        return
+    if kind == "connected":
+        team_id_to_workspace_id = _narrow_import_map(team_id_to_workspace_id, workspace_record, signer)
+    source_name = (
+        ei.format_migration_source_name(getattr(signer, "instance_id", "") or "", signer)
+        if signer is not None
+        else (meta.get("source_name") or "Connection")
+    )
     try:
-        _ensure_migration_connection(data, workspace_record, context)
         _run_migration_import(
             data,
             workspace_record,
@@ -1205,6 +1139,9 @@ def _complete_data_migration_import(
             acting_user_id=user_id,
             context=context,
         )
+        result, peer = "resumed", None
+        if getattr(workspace_record, "team_id", None):
+            result, peer = helpers.consider_migration_release(workspace_record.team_id)
         builders.refresh_home_tab_for_workspace(
             workspace_record,
             logger,
@@ -1215,7 +1152,20 @@ def _complete_data_migration_import(
         log_error("data_migration_import_failed", user_id=user_id, exc_info=True)
         _notify_import_result(client, body, user_id, _IMPORT_FAIL_TEXT)
         return
-    _notify_import_result(client, body, user_id, _IMPORT_DONE_TEXT)
+    _notify_import_result(
+        client,
+        body,
+        user_id,
+        _import_finished_text(
+            data,
+            workspace_record,
+            result,
+            peer,
+            source_name=source_name,
+            source_kind=kind,
+            has_pending=_workspace_has_pending_channels(workspace_record.id),
+        ),
+    )
 
 
 def handle_data_migration_review(
@@ -1224,21 +1174,14 @@ def handle_data_migration_review(
     logger: Logger,
     context: dict,
 ) -> None:
-    """Connect (if needed) and import after the review modal is submitted."""
+    """Import after the review modal is submitted."""
     user_id = helpers.get_user_id_from_body(body)
     if not user_id or not _is_admin(client, user_id, body):
         return
-    _complete_data_migration_import(body, client, logger, context, user_id=user_id)
-
-
-def handle_data_migration_proceed(
-    body: dict,
-    client: WebClient,
-    logger: Logger,
-    context: dict,
-) -> None:
-    """Proceed with import after user clicked the danger button despite warnings."""
-    user_id = helpers.get_user_id_from_body(body)
-    if not _is_admin(client, user_id, body):
-        return
-    _complete_data_migration_import(body, client, logger, context, user_id=user_id)
+    _complete_data_migration_import(
+        body,
+        client,
+        logger,
+        context,
+        user_id=user_id,
+    )

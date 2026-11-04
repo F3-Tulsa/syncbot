@@ -676,6 +676,8 @@ def _reject_unknown_source_team(body: dict, fed_ws: schemas.Instance) -> tuple[i
 
 
 def _peer_accepted(fed_ws: schemas.Instance | None) -> bool:
+    if helpers.is_self_instance(fed_ws):
+        return False
     return bool(fed_ws and getattr(fed_ws, "status", None) == "active" and peer_is_trusted(fed_ws))
 
 
@@ -852,6 +854,38 @@ def _pair_client_error(reason: str, status: int = 400) -> tuple[int, dict]:
     return status, {"error": reason}
 
 
+def _pair_success_body(*, url_updated: bool = False) -> dict:
+    _, our_public_key = federation.get_or_create_instance_keypair()
+    body = {
+        "ok": True,
+        "instance_id": federation.get_instance_id(),
+        "public_key": our_public_key,
+        "json_chunk_mb": constants.json_chunk_mb(),
+    }
+    if url_updated:
+        body["url_updated"] = True
+    return body
+
+
+def _get_accepted_peer(instance_id: str, public_key: str):
+    """Accepted peer row saved with this exact public key, if one exists."""
+    rows = DbManager.find_records(
+        schemas.Instance,
+        [
+            schemas.Instance.instance_id == instance_id,
+            schemas.Instance.status == "active",
+        ],
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    if not _peer_accepted(row):
+        return None
+    if (getattr(row, "public_key", None) or "").strip() != (public_key or "").strip():
+        return None
+    return row
+
+
 def handle_pair(body: dict, body_str: str, headers: dict) -> tuple[int, dict]:
     """Accept an incoming connection request from a remote instance.
 
@@ -882,6 +916,9 @@ def handle_pair(body: dict, body_str: str, headers: dict) -> tuple[int, dict]:
     if not federation.federation_verify(body_str, parsed["sig"], parsed["ts"], remote_public_key):
         return _pair_client_error("invalid_signature", 401)
 
+    if parsed["instance_id"] == federation.get_instance_id():
+        return _pair_client_error("self_pair")
+
     if not _PAIRING_CODE_RE.match(code):
         return _pair_client_error("invalid_code_format")
 
@@ -890,6 +927,15 @@ def handle_pair(body: dict, body_str: str, headers: dict) -> tuple[int, dict]:
         [schemas.FederationPairingCode.code == code],
     )
     if not pairing_rows:
+        if _get_accepted_peer(remote_instance_id, remote_public_key) is not None:
+            log_info(
+                "federation_pair",
+                direction="inbound",
+                ok=True,
+                peer_instance_id=remote_instance_id,
+                reason="code_already_used",
+            )
+            return 200, _pair_success_body()
         log_warning("federation_pair", direction="inbound", ok=False, reason="unknown_code")
         return _NOT_FOUND
     pairing = pairing_rows[0]
@@ -934,14 +980,6 @@ def handle_pair(body: dict, body_str: str, headers: dict) -> tuple[int, dict]:
             _apply_pairing_allowlist(pairing, existing)
             _consume_pairing_code(pairing)
             invalidate_fed_ws_for_sync_cache()
-            federation.push_allowed_workspaces(existing)
-            try:
-                from federation.replicate import replicate_peer_snapshot
-
-                replicate_peer_snapshot(existing)
-            except Exception:
-                log_error("federation_snapshot", peer_instance_id=existing.instance_id, ok=False)
-            _, our_public_key = federation.get_or_create_instance_keypair()
             log_info(
                 "federation_pair",
                 direction="inbound",
@@ -950,13 +988,7 @@ def handle_pair(body: dict, body_str: str, headers: dict) -> tuple[int, dict]:
                 convert=results,
             )
             _invalidate_local_homes()
-            return 200, {
-                "ok": True,
-                "instance_id": federation.get_instance_id(),
-                "public_key": our_public_key,
-                "url_updated": True,
-                "json_chunk_mb": constants.json_chunk_mb(),
-            }
+            return 200, _pair_success_body(url_updated=True)
         # Same instance_id with a different key. Untrust and pause stubs
         # rather than silent overwrite.
         mark_peer_untrusted(existing)
@@ -1006,15 +1038,6 @@ def handle_pair(body: dict, body_str: str, headers: dict) -> tuple[int, dict]:
     _consume_pairing_code(pairing)
 
     invalidate_fed_ws_for_sync_cache()
-    federation.push_allowed_workspaces(fed_ws)
-    try:
-        from federation.replicate import replicate_peer_snapshot
-
-        replicate_peer_snapshot(fed_ws)
-    except Exception:
-        log_error("federation_snapshot", peer_instance_id=fed_ws.instance_id, ok=False)
-
-    _, our_public_key = federation.get_or_create_instance_keypair()
 
     log_info(
         "federation_pair",
@@ -1025,12 +1048,7 @@ def handle_pair(body: dict, body_str: str, headers: dict) -> tuple[int, dict]:
     )
     _invalidate_local_homes()
 
-    return 200, {
-        "ok": True,
-        "instance_id": federation.get_instance_id(),
-        "public_key": our_public_key,
-        "json_chunk_mb": constants.json_chunk_mb(),
-    }
+    return 200, _pair_success_body()
 
 
 # ---------------------------------------------------------------------------
@@ -1718,6 +1736,7 @@ def handle_group_member_remove(body: dict, fed_ws: schemas.Instance) -> tuple[in
     ws = _workspace_for_replicated_team(fed_ws, team_id, create_stub=False)
     if not ws:
         return 200, {"ok": True}
+    helpers.replace_group_invite_code(groups[0].id, lambda: "FED-" + secrets.token_hex(4).upper())
     _post_carried_group_notice(groups[0].id, body)
     DbManager.delete_records(
         schemas.UserMapping,

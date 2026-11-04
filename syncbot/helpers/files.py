@@ -23,7 +23,7 @@ import requests
 from slack_sdk import WebClient
 
 from helpers.user_action_echo import slack_message_ts
-from logger import log_debug, log_error, log_warning
+from logger import log_debug, log_error, log_info, log_warning
 
 # Slack documents 1 GB per file on every plan, including Free.
 _MAX_FILE_BYTES = 1024 * 1024 * 1024
@@ -277,15 +277,99 @@ def assemble_parts_to_hashed(
 
 
 _SKIP_FILE_MODES = frozenset({"file_access", "tombstone", "hidden_by_limit"})
+_SLACK_FILE_URL_PREFIX = "https://files.slack.com/"
+
+
+def is_slack_file_url(url: str | None) -> bool:
+    """True when *url* is a Slack-hosted file on ``files.slack.com``."""
+    return isinstance(url, str) and url.startswith(_SLACK_FILE_URL_PREFIX)
+
+
+def is_outside_file(file: dict | None) -> bool:
+    """True when the file's copy lives outside Slack."""
+    if not isinstance(file, dict):
+        return False
+    return file.get("is_external") is True or file.get("mode") == "external"
 
 
 def hosted_file_fetch_url(file: dict | None) -> str | None:
     """Private download URL for a hosted Slack file, or None for stubs."""
-    if not isinstance(file, dict) or file.get("mode") in _SKIP_FILE_MODES:
+    if not isinstance(file, dict) or file.get("mode") in _SKIP_FILE_MODES or is_outside_file(file):
         return None
     url = file.get("url_private_download") or file.get("url_private") or ""
     url = str(url).strip()
-    return url or None
+    if not is_slack_file_url(url):
+        return None
+    return url
+
+
+def _outside_file_link(file: dict) -> str | None:
+    url = file.get("external_url")
+    if not isinstance(url, str) or not url.startswith("https://"):
+        return None
+    if any(char in url for char in (" ", "\t", "\n", "<", ">", "|")):
+        return None
+    return url
+
+
+def add_outside_file_links(
+    text: str | None,
+    blocks: list | None,
+    files: list | None,
+) -> tuple[str | None, list | None]:
+    """Append https ``external_url`` links for outside files. Skip a link already in *text*."""
+    from urllib.parse import urlparse
+
+    from helpers.message_blocks import blocks_include_body
+
+    source = text or ""
+    links: list[str] = []
+    for item in files or []:
+        if not isinstance(item, dict) or not is_outside_file(item):
+            continue
+        link = _outside_file_link(item)
+        if link is None:
+            raw = item.get("external_url")
+            host = urlparse(raw).hostname if isinstance(raw, str) and raw else None
+            log_info("file_share_skipped", host=host, external_type=item.get("external_type"))
+            continue
+        if link in source:
+            continue
+        links.append(link)
+    if not links:
+        return text, blocks
+    extra = "\n".join(f"<{url}>" for url in links)
+    new_text = extra if not source.strip() else f"{source.rstrip()}\n{extra}"
+    new_blocks = list(blocks or [])
+    if blocks_include_body(new_blocks):
+        elements: list[dict] = []
+        for index, url in enumerate(links):
+            if index:
+                elements.append({"type": "text", "text": "\n"})
+            elements.append({"type": "link", "url": url})
+        new_blocks.append({"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": elements}]})
+    return new_text, new_blocks
+
+
+def drop_outside_files(body: dict) -> dict:
+    """Return a copy of *body* whose event file lists omit outside files."""
+    import copy
+
+    cloned = copy.deepcopy(body)
+
+    def _keep(files: object) -> object:
+        if not isinstance(files, list):
+            return files
+        return [item for item in files if not (isinstance(item, dict) and is_outside_file(item))]
+
+    event = cloned.get("event")
+    if isinstance(event, dict):
+        if "files" in event:
+            event["files"] = _keep(event.get("files"))
+        message = event.get("message")
+        if isinstance(message, dict) and "files" in message:
+            message["files"] = _keep(message.get("files"))
+    return cloned
 
 
 def event_has_downloadable_hosted_file(event: dict | None) -> bool:
@@ -346,8 +430,13 @@ def download_slack_files(files: list[dict], client: WebClient, logger: Logger) -
                 }
             )
         except Exception as e:
-            log_error("file_share_failed", reason="download_failed", file_id=f.get("id"), error=str(e))
-            log_error("download_slack_files", value=f.get("id"), error=str(e))
+            log_error(
+                "file_share_failed",
+                reason="download_failed",
+                file_id=f.get("id"),
+                error_type=type(e).__name__,
+            )
+            log_error("download_slack_files", value=f.get("id"), error_type=type(e).__name__)
     return downloaded
 
 

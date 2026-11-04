@@ -8,6 +8,7 @@ from slack_sdk.web import WebClient
 import builders
 import helpers
 from db import DbManager, schemas
+from handlers._common import _counted
 from helpers.leave_sync import soft_delete_sync_channels
 from logger import log_info, log_warning
 from slack import actions, orm
@@ -639,10 +640,6 @@ def _disband_denial_message(reason: str, group_name: str, group_id: int, workspa
     )
 
 
-def _counted(count: int, singular: str, plural: str) -> str:
-    return f"`{count}` {singular if count == 1 else plural}"
-
-
 def _disband_confirm_blocks(
     group_name: str,
     group_id: int,
@@ -1059,6 +1056,7 @@ def handle_remove_group_member_confirm(
 ) -> None:
     """Soft-delete the member's Channel Syncs and hard-delete the membership."""
     from handlers._common import _close_modal_done, _parse_private_metadata
+    from handlers.group import _generate_invite_code
     from helpers.leave_sync import _replicate_one_remove, soft_delete_sync_channels
     from helpers.workspace_kind import is_stub_workspace
 
@@ -1114,6 +1112,7 @@ def handle_remove_group_member_confirm(
             if row.channel_id and row.channel_id not in removing:
                 removing.append(row.channel_id)
     hold = {(target.id, channel_id) for channel_id in removing}
+    helpers.replace_group_invite_code(group.id, _generate_invite_code)
     for channel_id in removing:
         soft_delete_sync_channels(
             target,

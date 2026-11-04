@@ -84,6 +84,16 @@ def test_import_keeps_an_active_channel_and_pends_a_new_one(real_db):
 
     workspace = _workspace()
     group, sync, row = _sync_and_channel(workspace)
+    now = datetime.now(UTC).replace(tzinfo=None)
+    DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=workspace.id,
+            status="active",
+            role="member",
+            joined_at=now,
+        )
+    )
     data = {
         "workspace": {"team_id": "TLOCAL"},
         "groups": [{"uid": group.uid, "name": "Group", "role": "member", "member_workspaces": []}],
@@ -205,6 +215,152 @@ def test_inbound_remove_of_a_missing_row_does_not_post(real_db):
     assert status == 200
     posted.assert_not_called()
     posted_too.assert_not_called()
+
+
+def test_import_with_no_peer_resumes():
+    from types import SimpleNamespace
+
+    from helpers.workspace import consider_migration_release, peer_still_hosts_team
+
+    workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
+    with (
+        patch("helpers.workspace.DbManager.get_record", return_value=workspace),
+        patch("helpers.workspace_kind.is_local_workspace", return_value=True),
+        patch("helpers.workspace.DbManager.find_records", return_value=[]),
+        patch("helpers.workspace.restore_migrated_workspace") as restore,
+    ):
+        assert consider_migration_release("T1") == ("resumed", None)
+        restore.assert_called_once_with("T1")
+        assert peer_still_hosts_team("T1") is False
+
+
+def test_import_stays_waiting_when_a_peer_still_has_the_team():
+    from types import SimpleNamespace
+
+    from helpers.workspace import consider_migration_release, get_migration_peer_hold, peer_still_hosts_team
+
+    workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
+    quiet = SimpleNamespace(instance_id="a" * 64, private_key_encrypted=None, status="active")
+    live = SimpleNamespace(instance_id="b" * 64, private_key_encrypted=None, status="active")
+
+    def push(peer, payload, **_kwargs):
+        assert {"team_id": "T1", "name": "Workspace A"} in payload["workspaces"]
+        if peer is quiet:
+            return None
+        return {"results": {"T1": "refused_live"}}
+
+    with (
+        patch("helpers.workspace.DbManager.get_record", return_value=workspace),
+        patch("helpers.workspace_kind.is_local_workspace", return_value=True),
+        patch("helpers.workspace_kind.peer_is_trusted", return_value=True),
+        patch("helpers.workspace.DbManager.find_records", return_value=[quiet, live]),
+        patch("federation.core.teams_allowlist_payload", return_value={"workspaces": []}),
+        patch("federation.core.push_teams", side_effect=push),
+        patch("helpers.workspace.restore_migrated_workspace") as restore,
+    ):
+        assert get_migration_peer_hold("T1") == ("still_hosted", live)
+        assert consider_migration_release("T1") == ("waiting_for_uninstall", live)
+        restore.assert_not_called()
+        assert peer_still_hosts_team("T1") is True
+
+
+def test_import_resumes_when_every_peer_has_released_the_team():
+    from types import SimpleNamespace
+
+    from helpers.workspace import consider_migration_release, get_migration_peer_hold, peer_still_hosts_team
+
+    workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
+    peer = SimpleNamespace(instance_id="b" * 64, private_key_encrypted=None, status="active")
+    for answer in ("converted", "already_stub", "missing", "ensured"):
+        with (
+            patch("helpers.workspace.DbManager.get_record", return_value=workspace),
+            patch("helpers.workspace_kind.is_local_workspace", return_value=True),
+            patch("helpers.workspace_kind.peer_is_trusted", return_value=True),
+            patch("helpers.workspace.DbManager.find_records", return_value=[peer]),
+            patch("federation.core.teams_allowlist_payload", return_value={"workspaces": []}),
+            patch("federation.core.push_teams", return_value={"results": {"T1": answer}}),
+            patch("helpers.workspace.restore_migrated_workspace") as restore,
+        ):
+            assert get_migration_peer_hold("T1") == ("released", None)
+            assert consider_migration_release("T1") == ("resumed", None)
+            restore.assert_called_once_with("T1")
+            assert peer_still_hosts_team("T1") is False
+
+
+def test_import_stays_pending_when_a_peer_cannot_be_reached():
+    from types import SimpleNamespace
+
+    from helpers.workspace import consider_migration_release, peer_still_hosts_team
+
+    workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
+    peer = SimpleNamespace(instance_id="c" * 64, private_key_encrypted=None, status="active")
+    with (
+        patch("helpers.workspace.DbManager.get_record", return_value=workspace),
+        patch("helpers.workspace_kind.is_local_workspace", return_value=True),
+        patch("helpers.workspace_kind.peer_is_trusted", return_value=True),
+        patch("helpers.workspace.DbManager.find_records", return_value=[peer]),
+        patch("federation.core.teams_allowlist_payload", return_value={"workspaces": []}),
+        patch("federation.core.push_teams", return_value=None),
+        patch("helpers.workspace.restore_migrated_workspace") as restore,
+    ):
+        assert consider_migration_release("T1") == ("unreachable", peer)
+        restore.assert_not_called()
+        assert peer_still_hosts_team("T1") is True
+
+
+def test_import_says_which_peer_refused_the_check():
+    from types import SimpleNamespace
+
+    from helpers.workspace import consider_migration_release, get_migration_peer_hold, peer_still_hosts_team
+
+    workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
+    peer = SimpleNamespace(instance_id="e" * 64, private_key_encrypted=None, status="active")
+    for status in (401, 403, 404):
+        with (
+            patch("helpers.workspace.DbManager.get_record", return_value=workspace),
+            patch("helpers.workspace_kind.is_local_workspace", return_value=True),
+            patch("helpers.workspace_kind.peer_is_trusted", return_value=True),
+            patch("helpers.workspace.DbManager.find_records", return_value=[peer]),
+            patch("federation.core.teams_allowlist_payload", return_value={"workspaces": []}),
+            patch("federation.core.push_teams", return_value={"_http_status": status}) as push,
+            patch("helpers.workspace.restore_migrated_workspace") as restore,
+        ):
+            assert get_migration_peer_hold("T1") == ("refused", peer)
+            assert consider_migration_release("T1") == ("refused", peer)
+            restore.assert_not_called()
+            assert peer_still_hosts_team("T1") is True
+        assert status in push.call_args.kwargs["accept_statuses"]
+
+
+def test_import_names_a_refusal_over_a_peer_it_cannot_reach():
+    from types import SimpleNamespace
+
+    from helpers.workspace import get_migration_peer_hold
+
+    workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
+    down = SimpleNamespace(instance_id="f" * 64, private_key_encrypted=None, status="active")
+    refusing = SimpleNamespace(instance_id="9" * 64, private_key_encrypted=None, status="active")
+
+    def push(peer, payload, **_kwargs):
+        return None if peer is down else {"_http_status": 401}
+
+    with (
+        patch("helpers.workspace.DbManager.get_record", return_value=workspace),
+        patch("helpers.workspace_kind.is_local_workspace", return_value=True),
+        patch("helpers.workspace_kind.peer_is_trusted", return_value=True),
+        patch("helpers.workspace.DbManager.find_records", return_value=[down, refusing]),
+        patch("federation.core.teams_allowlist_payload", return_value={"workspaces": []}),
+        patch("federation.core.push_teams", side_effect=push),
+    ):
+        assert get_migration_peer_hold("T1") == ("refused", refusing)
+
+
+def test_push_teams_keeps_its_default_statuses():
+    from federation import core as federation_core
+
+    with patch.object(federation_core, "_federation_request", return_value={"ok": True}) as request:
+        federation_core.push_teams(object(), {"workspaces": []})
+    assert request.call_args.kwargs["accept_statuses"] == frozenset({200, 409})
 
 
 def test_unarchive_without_the_bot_tells_the_other_channels(real_db):

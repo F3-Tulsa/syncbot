@@ -152,9 +152,7 @@ def handle_create_group_submit(
     )
     DbManager.create_record(member)
 
-    log_info(
-        "group_created", workspace_id=workspace_record.id, group_id=group.id, group_name=group_name, invite_code=code
-    )
+    log_info("group_created", workspace_id=workspace_record.id, group_id=group.id, group_name=group_name)
 
     acting_user_id = user_id
     if acting_user_id:

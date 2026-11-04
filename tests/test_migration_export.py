@@ -1,10 +1,11 @@
 """Data migration export looks up Workspaces by integer primary key."""
 
+import json
 import os
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -21,13 +22,23 @@ class TestBuildMigrationExportWorkspaceLookup:
             workspace_name="Workspace A",
             deleted_at=None,
         )
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        from federation.core import public_key_fingerprint
+
+        key = Ed25519PrivateKey.generate()
+        pem = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+        fingerprint = public_key_fingerprint(pem)
         with (
             patch("helpers.export_import.get_workspace_by_id", return_value=workspace) as get_ws,
             patch("helpers.export_import.DbManager.find_records", return_value=[]),
             patch("helpers.export_import.os.environ.get", return_value=""),
+            patch("federation.core.get_or_create_instance_keypair", return_value=(key, pem)),
+            patch("federation.core.get_instance_id", return_value=fingerprint),
             caplog.at_level(logging.DEBUG, logger="syncbot"),
         ):
-            payload = build_migration_export(42, include_source_instance=False)
+            payload = build_migration_export(42)
 
         get_ws.assert_called_with(42)
         assert payload["workspace"] == {"team_id": "T1", "workspace_name": "Workspace A"}
@@ -36,6 +47,9 @@ class TestBuildMigrationExportWorkspaceLookup:
         assert payload["version"] == 1
         assert payload["syncbot_version"]
         assert "federation_file_parts" not in payload
+        assert payload["source_instance"] == {"instance_id": fingerprint, "public_key": pem}
+        assert "webhook_url" not in payload["source_instance"]
+        assert "connection_code" not in payload["source_instance"]
         assert any(
             record.message == "migration_export" and record.__dict__.get("team_id") == "T1" for record in caplog.records
         )
@@ -46,6 +60,32 @@ class TestBuildMigrationExportWorkspaceLookup:
             pytest.raises(ValueError, match="Workspace not found"),
         ):
             build_migration_export(99)
+
+    def test_raises_when_the_file_cannot_be_signed(self):
+        workspace = SimpleNamespace(
+            id=42,
+            team_id="T1",
+            workspace_name="Workspace A",
+            deleted_at=None,
+        )
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        from federation.core import public_key_fingerprint
+
+        key = Ed25519PrivateKey.generate()
+        pem = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+        fingerprint = public_key_fingerprint(pem)
+        with (
+            patch("helpers.export_import.get_workspace_by_id", return_value=workspace),
+            patch("helpers.export_import.DbManager.find_records", return_value=[]),
+            patch("helpers.export_import.os.environ.get", return_value=""),
+            patch("federation.core.get_or_create_instance_keypair", return_value=(key, pem)),
+            patch("federation.core.get_instance_id", return_value=fingerprint),
+            patch("federation.core.sign_body", side_effect=RuntimeError),
+            pytest.raises(RuntimeError),
+        ):
+            build_migration_export(42)
 
     def test_exports_channel_participation_and_posting_identity(self):
         workspace = SimpleNamespace(id=42, team_id="T1", workspace_name="Workspace A", deleted_at=None)
@@ -88,6 +128,13 @@ class TestBuildMigrationExportWorkspaceLookup:
                 "UserMapping": [],
             }.get(model.__name__, [])
 
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        from federation.core import public_key_fingerprint
+
+        key = Ed25519PrivateKey.generate()
+        pem = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
         with (
             patch("helpers.export_import.get_workspace_by_id", return_value=workspace),
             patch("helpers.export_import.DbManager.find_records", side_effect=find_records),
@@ -95,8 +142,10 @@ class TestBuildMigrationExportWorkspaceLookup:
                 "helpers.export_import.DbManager.get_record",
                 side_effect=lambda model, *args, **kwargs: group if model.__name__ == "WorkspaceGroup" else sync,
             ),
+            patch("federation.core.get_or_create_instance_keypair", return_value=(key, pem)),
+            patch("federation.core.get_instance_id", return_value=public_key_fingerprint(pem)),
         ):
-            payload = build_migration_export(42, include_source_instance=False)
+            payload = build_migration_export(42)
 
         assert payload["sync_channels"] == [
             {
@@ -177,6 +226,13 @@ class TestBuildMigrationExportWorkspaceLookup:
         def get_ws(pk):
             return local if pk == 42 else peer
 
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        from federation.core import public_key_fingerprint
+
+        key = Ed25519PrivateKey.generate()
+        pem = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
         with (
             patch("helpers.export_import.get_workspace_by_id", side_effect=get_ws),
             patch("helpers.export_import.DbManager.find_records", side_effect=find_records),
@@ -184,8 +240,10 @@ class TestBuildMigrationExportWorkspaceLookup:
                 "helpers.export_import.DbManager.get_record",
                 side_effect=lambda model, *args, **kwargs: group if model.__name__ == "WorkspaceGroup" else sync,
             ),
+            patch("federation.core.get_or_create_instance_keypair", return_value=(key, pem)),
+            patch("federation.core.get_instance_id", return_value=public_key_fingerprint(pem)),
         ):
-            payload = build_migration_export(42, include_source_instance=False)
+            payload = build_migration_export(42)
 
         channels = {(row["team_id"], row["channel_id"]) for row in payload["sync_channels"]}
         assert channels == {("T1", "C1"), ("T-PEER", "C-PEER")}
@@ -364,17 +422,6 @@ def test_import_without_source_instance_skips_unknown_peer_channels():
     assert posts == []
 
 
-def test_import_unknown_source_instance_does_not_guess_sole_trusted_peer():
-    from helpers.export_import import _peer_instance_id_from_migration
-
-    with (
-        patch("helpers.export_import.DbManager.find_records", return_value=[]),
-        patch("helpers.export_import._sole_trusted_peer_instance_id") as sole,
-    ):
-        assert _peer_instance_id_from_migration({"source_instance": {"instance_id": "other-fp"}}) is None
-        sole.assert_not_called()
-
-
 def test_import_post_meta_onto_peer_stub_channels():
     data = {
         "source_instance": {"instance_id": "peer-fp"},
@@ -424,7 +471,7 @@ def test_import_post_meta_onto_peer_stub_channels():
         patch("helpers.workspace_kind.ensure_stub_workspace") as ensure_stub,
         patch("helpers.export_import.get_workspace_by_id", return_value=None),
     ):
-        import_migration_data(data, 42, 3, team_id_to_workspace_id={"T1": 42})
+        import_migration_data(data, 42, 3, team_id_to_workspace_id={"T1": 42, "T-PEER": 99})
     ensure_stub.assert_not_called()
 
     channels = {row.channel_id: row for row in created if type(row).__name__ == "SyncChannel"}
@@ -583,11 +630,78 @@ def _export_rows():
     return local
 
 
+def test_export_signature_names_this_install(real_db):
+    import base64
+    import copy
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    from federation.core import get_instance_id, public_key_fingerprint
+    from helpers.export_import import canonical_json_dumps, verify_migration_signature
+
+    local = _export_rows()
+    payload = build_migration_export(local.id)
+    source = payload["source_instance"]
+    assert source["instance_id"] == get_instance_id()
+    assert public_key_fingerprint(source["public_key"]) == source["instance_id"]
+    assert "webhook_url" not in source
+    assert "connection_code" not in source
+    assert verify_migration_signature(payload)
+
+    changed = copy.deepcopy(payload)
+    changed["groups"][0]["name"] = "Renamed"
+    assert verify_migration_signature(changed) is False
+
+    other = Ed25519PrivateKey.generate()
+    other_pem = other.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+    resigned = copy.deepcopy(payload)
+    resigned["source_instance"]["public_key"] = other_pem
+    raw = canonical_json_dumps({key: value for key, value in resigned.items() if key != "signature"}).decode()
+    resigned["signature"] = base64.b64encode(other.sign(raw.encode())).decode()
+    assert verify_migration_signature(resigned) is False
+    assert verify_migration_signature({"version": 1, "groups": []}) is False
+
+
+def test_review_refuses_a_file_with_no_signature():
+    from handlers.export_import import handle_data_migration_submit_ack
+
+    payload = {"version": 1, "workspace": {"team_id": "T1"}, "groups": []}
+    workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
+    body = {
+        "user": {"id": "U1"},
+        "team": {"id": "T1"},
+        "view": {
+            "state": {
+                "values": {
+                    "data_migration_json_input": {
+                        "data_migration_json_input": {
+                            "files": [{"url_private_download": "https://files.slack.com/m.json"}],
+                        }
+                    }
+                }
+            }
+        },
+    }
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(json.dumps(payload), None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
+        patch("handlers.export_import.DbManager.find_records", return_value=[]),
+        patch("helpers._cache._cache_set") as cache_set,
+    ):
+        resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+    assert resp["response_action"] == "errors"
+    assert "cannot check this file" in resp["errors"]["data_migration_json_input"]
+    assert "1.7.3" in resp["errors"]["data_migration_json_input"]
+    cache_set.assert_not_called()
+
+
 def test_export_omits_a_disbanded_group_and_a_group_this_workspace_left(real_db):
     from helpers.export_import import build_migration_export
 
     local = _export_rows()
-    payload = build_migration_export(local.id, include_source_instance=False)
+    payload = build_migration_export(local.id)
     assert [group["uid"] for group in payload["groups"]] == ["live-uid"]
     assert payload["groups"][0]["member_team_ids"] == ["TB"]
     channels = {row["channel_id"] for row in payload["sync_channels"]}
@@ -670,20 +784,762 @@ def test_import_does_not_revive_a_disbanded_group(real_db):
     assert revived_maps == []
 
 
+def _two_local_workspaces():
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    instance_id = get_instance_id()
+    workspace_a = DbManager.create_record(
+        schemas.Workspace(team_id="TA", workspace_name="Workspace A", instance_id=instance_id)
+    )
+    workspace_b = DbManager.create_record(
+        schemas.Workspace(team_id="TB", workspace_name="Workspace B", instance_id=instance_id)
+    )
+    group = DbManager.create_record(
+        schemas.WorkspaceGroup(
+            name="B Group",
+            invite_code="BGRP-0001",
+            status="active",
+            created_at=now,
+            uid="b-group",
+        )
+    )
+    DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=workspace_b.id,
+            status="active",
+            role="owner",
+            joined_at=now,
+        )
+    )
+    sync = DbManager.create_record(schemas.Sync(uid="b-sync", title="B Sync", group_id=group.id, sync_mode="group"))
+    DbManager.create_record(
+        schemas.SyncChannel(
+            sync_id=sync.id,
+            workspace_id=workspace_b.id,
+            channel_id="CGEN",
+            channel_name="general",
+            status="active",
+            publishes=True,
+            subscribes=True,
+            created_at=now,
+        )
+    )
+    return workspace_a, workspace_b, group, sync
+
+
+def test_import_leaves_another_local_workspace_unchanged(real_db):
+    from db import DbManager, schemas
+    from helpers.export_import import import_migration_data
+
+    workspace_a, workspace_b, b_sync_group, b_sync = _two_local_workspaces()
+    import_migration_data(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [
+                {
+                    "uid": "a-group",
+                    "name": "A Group",
+                    "role": "owner",
+                    "member_workspaces": [{"team_id": "TB", "role": "member", "workspace_name": "Workspace B"}],
+                }
+            ],
+            "syncs": [{"uid": "a-sync", "group_uid": "a-group", "title": "A Sync"}],
+            "sync_channels": [{"sync_uid": "a-sync", "team_id": "TB", "channel_id": "CGEN", "channel_name": "general"}],
+            "user_mappings": [],
+        },
+        workspace_a.id,
+        team_id_to_workspace_id={"TA": workspace_a.id},
+    )
+    a_group = DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.uid == "a-group"])[0]
+    members = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [
+            schemas.WorkspaceGroupMember.group_id == a_group.id,
+            schemas.WorkspaceGroupMember.deleted_at.is_(None),
+        ],
+    )
+    assert {row.workspace_id for row in members} == {workspace_a.id}
+    a_sync = DbManager.find_records(schemas.Sync, [schemas.Sync.uid == "a-sync"])[0]
+    assert (
+        DbManager.find_records(
+            schemas.SyncChannel,
+            [
+                schemas.SyncChannel.sync_id == a_sync.id,
+                schemas.SyncChannel.workspace_id == workspace_b.id,
+            ],
+        )
+        == []
+    )
+    original = DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.channel_id == "CGEN"])[0]
+    assert original.sync_id == b_sync.id
+    assert original.workspace_id == workspace_b.id
+    assert b_sync_group.id == b_sync.group_id
+
+
+def test_import_skips_a_group_this_workspace_is_not_in(real_db):
+    from db import DbManager, schemas
+    from helpers.export_import import import_migration_data
+
+    workspace_a, workspace_b, group, _sync = _two_local_workspaces()
+    import_migration_data(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [{"uid": "b-group", "name": "B Group", "role": "owner"}],
+            "syncs": [{"uid": "b-sync", "group_uid": "b-group", "title": "Taken"}],
+            "sync_channels": [],
+        },
+        workspace_a.id,
+        team_id_to_workspace_id={"TA": workspace_a.id},
+    )
+    members = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [schemas.WorkspaceGroupMember.group_id == group.id],
+    )
+    assert [row.workspace_id for row in members] == [workspace_b.id]
+    assert members[0].role == "owner"
+    kept = DbManager.find_records(schemas.Sync, [schemas.Sync.uid == "b-sync"])[0]
+    assert kept.title == "B Sync"
+    assert kept.group_id == group.id
+
+
+def test_import_keeps_an_existing_sync_in_its_group(real_db):
+    from db import DbManager, schemas
+    from helpers.export_import import import_migration_data
+
+    workspace_a, workspace_b, group, _sync = _two_local_workspaces()
+    import_migration_data(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [{"uid": "a-group", "name": "A Group", "role": "owner"}],
+            "syncs": [{"uid": "b-sync", "group_uid": "a-group", "title": "Moved"}],
+            "sync_channels": [{"sync_uid": "b-sync", "team_id": "TB", "channel_id": "CGEN"}],
+        },
+        workspace_a.id,
+        team_id_to_workspace_id={"TA": workspace_a.id},
+    )
+    kept = DbManager.find_records(schemas.Sync, [schemas.Sync.uid == "b-sync"])[0]
+    assert kept.group_id == group.id
+    assert kept.title == "B Sync"
+    rows = DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.channel_id == "CGEN"])
+    assert [(row.sync_id, row.workspace_id) for row in rows] == [(kept.id, workspace_b.id)]
+
+
+def test_import_skips_a_mapping_onto_another_local_workspace(real_db):
+    from db import DbManager, schemas
+    from helpers.export_import import import_migration_data
+
+    workspace_a, workspace_b, _group, _sync = _two_local_workspaces()
+    import_migration_data(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [{"uid": "a-group", "name": "A Group", "role": "member"}],
+            "syncs": [],
+            "sync_channels": [],
+            "user_mappings": [
+                {
+                    "source_team_id": "TA",
+                    "target_team_id": "TB",
+                    "source_user_id": "UA",
+                    "target_user_id": "UB",
+                    "map_method": "manual",
+                    "group_uid": "a-group",
+                }
+            ],
+        },
+        workspace_a.id,
+        team_id_to_workspace_id={"TA": workspace_a.id},
+    )
+    assert (
+        DbManager.find_records(
+            schemas.UserMapping,
+            [schemas.UserMapping.target_workspace_id == workspace_b.id],
+        )
+        == []
+    )
+
+
+def test_import_skips_a_mapping_without_both_team_ids(real_db):
+    from db import DbManager, schemas
+    from helpers.export_import import import_migration_data
+
+    workspace_a, _workspace_b, _group, _sync = _two_local_workspaces()
+    import_migration_data(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [{"uid": "a-group", "name": "A Group", "role": "member"}],
+            "syncs": [],
+            "sync_channels": [],
+            "user_mappings": [
+                {
+                    "source_team_id": None,
+                    "target_team_id": "TA",
+                    "source_user_id": "U-GONE",
+                    "target_user_id": "UA",
+                    "map_method": "manual",
+                    "group_uid": "a-group",
+                },
+                {
+                    "source_team_id": "TA",
+                    "target_team_id": "",
+                    "source_user_id": "UA",
+                    "target_user_id": "U-GONE",
+                    "map_method": "manual",
+                    "group_uid": "a-group",
+                },
+            ],
+        },
+        workspace_a.id,
+        team_id_to_workspace_id={"TA": workspace_a.id},
+    )
+    assert (
+        DbManager.find_records(schemas.UserMapping, [schemas.UserMapping.source_workspace_id == workspace_a.id]) == []
+    )
+    assert (
+        DbManager.find_records(schemas.UserMapping, [schemas.UserMapping.target_workspace_id == workspace_a.id]) == []
+    )
+
+
+def test_import_writes_a_stub_already_in_the_group(real_db):
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+    from helpers.export_import import import_migration_data
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    workspace_a = DbManager.create_record(
+        schemas.Workspace(team_id="TA", workspace_name="Workspace A", instance_id=get_instance_id())
+    )
+    peer = DbManager.create_record(
+        schemas.Instance(
+            instance_id="b" * 64,
+            public_key="pem",
+            status="active",
+            trust_status="trusted",
+            name="Partner Org",
+            created_at=now,
+        )
+    )
+    stub = DbManager.create_record(
+        schemas.Workspace(team_id="TC", workspace_name="Workspace B", instance_id=peer.instance_id)
+    )
+    group = DbManager.create_record(
+        schemas.WorkspaceGroup(
+            name="A Group",
+            invite_code="AGRP-0001",
+            status="active",
+            created_at=now,
+            uid="a-group",
+        )
+    )
+    DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=workspace_a.id,
+            status="active",
+            role="owner",
+            joined_at=now,
+        )
+    )
+    import_migration_data(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [
+                {
+                    "uid": "a-group",
+                    "name": "A Group",
+                    "role": "owner",
+                    "member_workspaces": [{"team_id": "TC", "role": "member", "workspace_name": "Workspace B"}],
+                }
+            ],
+            "syncs": [{"uid": "a-sync", "group_uid": "a-group", "title": "A Sync"}],
+            "sync_channels": [
+                {"sync_uid": "a-sync", "team_id": "TC", "channel_id": "CSTUB", "channel_name": "general"}
+            ],
+            "post_meta": {"a-sync:CSTUB": [{"post_id": "P1", "ts": "10.000001"}]},
+        },
+        workspace_a.id,
+        team_id_to_workspace_id={"TA": workspace_a.id, "TC": stub.id},
+    )
+    members = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [
+            schemas.WorkspaceGroupMember.group_id == group.id,
+            schemas.WorkspaceGroupMember.deleted_at.is_(None),
+        ],
+    )
+    assert {row.workspace_id for row in members} == {workspace_a.id, stub.id}
+    channel = DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.channel_id == "CSTUB"])[0]
+    assert channel.workspace_id == stub.id
+    assert DbManager.find_records(schemas.PostMeta, [schemas.PostMeta.sync_channel_id == channel.id])
+
+
+def test_prepare_maps_only_this_workspace_and_live_stubs(real_db):
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+    from handlers.export_import import _data_migration_prepare
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    workspace_a, workspace_b, _group, _sync = _two_local_workspaces()
+    peer = DbManager.create_record(
+        schemas.Instance(
+            instance_id="c" * 64,
+            public_key="pem",
+            status="active",
+            trust_status="trusted",
+            name="Partner Org",
+            created_at=now,
+        )
+    )
+    stub = DbManager.create_record(
+        schemas.Workspace(team_id="TC", workspace_name="Workspace B", instance_id=peer.instance_id)
+    )
+    DbManager.create_record(
+        schemas.Workspace(
+            team_id="TD",
+            workspace_name=None,
+            instance_id=get_instance_id(),
+            deleted_at=now,
+        )
+    )
+    DbManager.create_record(
+        schemas.Workspace(
+            team_id="TE",
+            workspace_name=None,
+            instance_id=peer.instance_id,
+            deleted_at=now,
+        )
+    )
+    body = {
+        "user": {"id": "U1"},
+        "team": {"id": "TA"},
+        "view": {
+            "state": {
+                "values": {
+                    "data_migration_json_input": {
+                        "data_migration_json_input": {
+                            "files": [{"url_private_download": "https://files.slack.com/m.json"}],
+                        }
+                    }
+                }
+            }
+        },
+    }
+    payload = {"version": 1, "workspace": {"team_id": "TA"}, "groups": []}
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(json.dumps(payload), None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace_a),
+    ):
+        err, _data, group_id, team_map, _workspace = _data_migration_prepare(body, MagicMock(token="xoxb"), {})
+    assert err is None
+    assert group_id == 0
+    assert set(team_map) == {"TA", "TC"}
+    assert team_map["TA"] == workspace_a.id
+    assert team_map["TC"] == stub.id
+    assert workspace_b.id not in team_map.values()
+
+
 def test_confirm_import_does_not_add_a_status_line():
     from handlers.export_import import _migration_overview_blocks
 
     blocks = _migration_overview_blocks(
         {
-            "groups": [{"uid": "live-uid", "name": "Partner Org"}],
+            "workspace": {"team_id": "TA"},
+            "groups": [{"uid": "live-uid", "name": "Live Group"}],
             "syncs": [{"uid": "live-sync", "group_uid": "live-uid", "title": "Announcements"}],
-            "sync_channels": [{"sync_uid": "live-sync", "channel_id": "C1"}],
+            "sync_channels": [{"sync_uid": "live-sync", "team_id": "TA", "channel_id": "C1"}],
             "user_mappings": [],
             "post_meta": {},
         }
     )
     text = "\n".join(getattr(block, "label", "") or "" for block in blocks)
-    assert "Partner Org" in text
+    assert "```Group Name: Live Group\nSynced Channels: 1 (#C1)\nMapped Users: 0\nSynced Messages: 0```" in text
     assert "Deleted Status" not in text
     assert "Disbanded" not in text
     assert "\nStatus:" not in text
+
+
+def test_overview_shows_each_group_in_its_own_block():
+    from handlers.export_import import _migration_overview_blocks
+
+    blocks = _migration_overview_blocks(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [
+                {"uid": "live", "name": "Live Group"},
+                {"uid": "other", "name": "Other Group"},
+            ],
+            "syncs": [
+                {"uid": "daily", "group_uid": "live", "title": "Daily"},
+                {"uid": "news", "group_uid": "live", "title": "News"},
+            ],
+            "sync_channels": [
+                {"sync_uid": "daily", "team_id": "TA", "channel_id": "C1", "channel_name": "general"},
+                {"sync_uid": "news", "team_id": "TA", "channel_id": "C2", "channel_name": "announcements"},
+                {"sync_uid": "daily", "team_id": "TB", "channel_id": "C3", "channel_name": "general"},
+            ],
+            "user_mappings": [{"source_user_id": f"U{index}", "group_uid": "live"} for index in range(3)]
+            + [{"source_user_id": "U9", "group_uid": "other"}],
+            "post_meta": {
+                "daily:C1": [{"kind": "message", "post_id": str(index)} for index in range(1200)],
+                "daily:C3": [{"kind": "message", "post_id": str(index)} for index in range(4)],
+            },
+        }
+    )
+    text = "\n".join(getattr(block, "label", "") or "" for block in blocks)
+    assert text.startswith("*File contents*")
+    assert (
+        "```Group Name: Live Group\n"
+        "Synced Channels: 2 (#general, #announcements)\n"
+        "Mapped Users: 3\n"
+        "Synced Messages: 1204```"
+    ) in text
+    assert "```Group Name: Other Group\nSynced Channels: 0\nMapped Users: 1\nSynced Messages: 0```" in text
+
+
+def test_overview_says_when_the_file_has_no_groups():
+    from handlers.export_import import _migration_overview_blocks
+
+    empty = _migration_overview_blocks({"groups": [], "syncs": [], "sync_channels": [], "user_mappings": []})
+    text = "\n".join(getattr(block, "label", "") or "" for block in empty)
+    assert text == "This file has no Groups."
+
+
+def test_overview_keeps_a_backtick_in_a_name_inside_its_block():
+    from handlers.export_import import _migration_overview_blocks
+
+    blocks = _migration_overview_blocks(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [{"uid": "live", "name": "Live `Group`"}],
+            "syncs": [],
+            "sync_channels": [],
+            "user_mappings": [],
+        }
+    )
+    text = "\n".join(getattr(block, "label", "") or "" for block in blocks)
+    assert "Group Name: Live 'Group'" in text
+    assert text.count("```") == 2
+
+
+def _upload_body(payload):
+    return {
+        "user": {"id": "U1"},
+        "team": {"id": "TA"},
+        "view": {
+            "state": {
+                "values": {
+                    "data_migration_json_input": {
+                        "data_migration_json_input": {
+                            "files": [{"url_private_download": "https://files.slack.com/m.json"}],
+                        }
+                    }
+                }
+            }
+        },
+    }, json.dumps(payload)
+
+
+def _peer_signed_file(*, name="Workspace B", groups=None):
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    from federation.core import public_key_fingerprint
+    from helpers.export_import import canonical_json_dumps
+
+    private = Ed25519PrivateKey.generate()
+    public_pem = private.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+    instance_id = public_key_fingerprint(public_pem)
+    payload = {
+        "version": 1,
+        "workspace": {"team_id": "TA", "workspace_name": "Workspace A"},
+        "groups": groups if groups is not None else [{"uid": "g1", "name": "Live Group"}],
+        "syncs": [],
+        "sync_channels": [],
+        "source_instance": {"instance_id": instance_id, "public_key": public_pem, "name": name},
+        "signed_at": "2026-01-01T00:00:00Z",
+    }
+    raw = canonical_json_dumps({key: value for key, value in payload.items() if key != "signature"}).decode()
+    payload["signature"] = base64.b64encode(private.sign(raw.encode())).decode()
+    return payload, instance_id, public_pem
+
+
+def _save_peer(
+    instance_id, public_pem, *, name="Partner Org", primary_workspace_name=None, status="active", trust="trusted"
+):
+    from datetime import UTC, datetime
+
+    from db import DbManager, schemas
+
+    return DbManager.create_record(
+        schemas.Instance(
+            instance_id=instance_id,
+            public_key=public_pem,
+            private_key_encrypted=None,
+            status=status,
+            trust_status=trust,
+            name=name,
+            primary_workspace_name=primary_workspace_name,
+            created_at=datetime.now(UTC).replace(tzinfo=None),
+        )
+    )
+
+
+def test_import_of_this_install_opens_the_review(real_db):
+    from handlers.export_import import handle_data_migration_submit_ack
+    from helpers.export_import import build_migration_export, get_migration_file_status
+
+    local = _export_rows()
+    payload = build_migration_export(local.id)
+    assert get_migration_file_status(payload)[0] == "this_install"
+    body, text = _upload_body(payload)
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(text, None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=local),
+    ):
+        resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+    assert resp["response_action"] == "update"
+    assert resp["view"]["title"]["text"] == "Confirm Import"
+
+
+def test_import_refuses_a_changed_file(real_db):
+    import copy
+
+    from handlers.export_import import handle_data_migration_submit_ack
+    from helpers.export_import import build_migration_export
+
+    local = _export_rows()
+    payload = build_migration_export(local.id)
+    changed = copy.deepcopy(payload)
+    changed["groups"][0]["name"] = "Renamed"
+    body, text = _upload_body(changed)
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(text, None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=local),
+        patch("helpers._cache._cache_set") as cache_set,
+    ):
+        resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+    assert resp["response_action"] == "errors"
+    assert "was changed after it was exported" in resp["errors"]["data_migration_json_input"]
+    cache_set.assert_not_called()
+
+
+def test_import_names_an_unknown_signer_by_id_prefix(real_db):
+    from handlers.export_import import handle_data_migration_submit_ack
+    from helpers.export_import import get_migration_file_status
+
+    payload, instance_id, _public = _peer_signed_file(name="Workspace A")
+    assert get_migration_file_status(payload)[0] == "unknown"
+    local = _export_rows()
+    body, text = _upload_body(payload)
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(text, None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=local),
+    ):
+        resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+    message = resp["errors"]["data_migration_json_input"]
+    assert f"`Connection {instance_id[:8]}`" in message
+    assert "Workspace A" not in message
+
+
+def test_connected_file_is_named_from_the_saved_connection(real_db):
+    from helpers.export_import import format_migration_source_name, get_migration_file_status
+
+    payload, instance_id, public_pem = _peer_signed_file(name="Workspace B")
+    peer = _save_peer(instance_id, public_pem, name="Partner Org")
+    with patch("helpers.settings.federation_enabled", return_value=True):
+        kind, row = get_migration_file_status(payload)
+    assert kind == "connected"
+    assert row.instance_id == peer.instance_id
+    assert format_migration_source_name(instance_id, row) == "Partner Org"
+
+    from db import DbManager, schemas
+
+    DbManager.update_records(
+        schemas.Instance,
+        [schemas.Instance.instance_id == instance_id],
+        {schemas.Instance.name: None, schemas.Instance.primary_workspace_name: "Workspace A"},
+    )
+    blank = DbManager.get_record(schemas.Instance, id=instance_id)
+    assert format_migration_source_name(instance_id, blank) == f"Connection {instance_id[:8]}"
+
+
+def test_import_refuses_a_peer_that_is_not_an_active_connection(real_db):
+    from handlers.export_import import handle_data_migration_submit_ack
+
+    payload, instance_id, public_pem = _peer_signed_file()
+    peer = _save_peer(instance_id, public_pem, name="Partner Org", trust="untrusted")
+    local = _export_rows()
+    body, text = _upload_body(payload)
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(text, None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=local),
+        patch("helpers.settings.federation_enabled", return_value=True),
+    ):
+        refused = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+    assert "not active" in refused["errors"]["data_migration_json_input"]
+    assert "`Partner Org`" in refused["errors"]["data_migration_json_input"]
+
+    from db import DbManager, schemas
+
+    DbManager.update_records(
+        schemas.Instance,
+        [schemas.Instance.instance_id == peer.instance_id],
+        {schemas.Instance.trust_status: "trusted", schemas.Instance.status: "inactive"},
+    )
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(text, None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=local),
+        patch("helpers.settings.federation_enabled", return_value=True),
+    ):
+        inactive = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+    assert "not active" in inactive["errors"]["data_migration_json_input"]
+
+    DbManager.update_records(
+        schemas.Instance,
+        [schemas.Instance.instance_id == peer.instance_id],
+        {schemas.Instance.status: "active"},
+    )
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(text, None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=local),
+        patch("helpers.settings.federation_enabled", return_value=False),
+    ):
+        off = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+    assert "Federation is off" in off["errors"]["data_migration_json_input"]
+    assert "`Partner Org`" in off["errors"]["data_migration_json_input"]
+
+
+def test_finish_imports_nothing_when_the_signer_is_no_longer_trusted(real_db):
+    from handlers.export_import import handle_data_migration_review
+
+    payload, instance_id, public_pem = _peer_signed_file()
+    _save_peer(instance_id, public_pem, name="Partner Org", trust="untrusted")
+    local = _export_rows()
+    body = {"user": {"id": "U1"}, "view": {"id": "V1", "state": {"values": {}}}}
+    meta = {
+        "data": payload,
+        "group_id": 0,
+        "workspace_id": local.id,
+        "team_id_to_workspace_id": {"TA": local.id},
+        "source_name": "Partner Org",
+        "source_kind": "connected",
+        "source_instance_id": instance_id,
+    }
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("helpers._cache._cache_get", return_value=meta),
+        patch("handlers.export_import.helpers.get_workspace_by_id", return_value=local),
+        patch("helpers.settings.federation_enabled", return_value=True),
+        patch("handlers.export_import._run_migration_import") as run_import,
+        patch("handlers.export_import.helpers.notify_user_dm") as dm,
+        patch("handlers._common._close_modal_done"),
+    ):
+        handle_data_migration_review(body, MagicMock(), MagicMock(), {})
+    run_import.assert_not_called()
+    assert "no longer connected" in dm.call_args.args[2]
+    assert "`Partner Org`" in dm.call_args.args[2]
+
+
+def test_connected_import_writes_only_that_installs_stubs(real_db):
+    from datetime import UTC, datetime
+
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+    from handlers.export_import import _narrow_import_map
+    from helpers.export_import import import_migration_data
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    workspace_a = DbManager.create_record(
+        schemas.Workspace(team_id="TA", workspace_name="Workspace A", instance_id=get_instance_id())
+    )
+    partner = DbManager.create_record(
+        schemas.Instance(
+            instance_id="b" * 64,
+            public_key="pem",
+            status="active",
+            trust_status="trusted",
+            name="Partner Org",
+            created_at=now,
+        )
+    )
+    other = DbManager.create_record(
+        schemas.Instance(
+            instance_id="c" * 64,
+            public_key="pem-other",
+            status="active",
+            trust_status="trusted",
+            name=None,
+            created_at=now,
+        )
+    )
+    partner_stub = DbManager.create_record(
+        schemas.Workspace(team_id="TC", workspace_name="Workspace B", instance_id=partner.instance_id)
+    )
+    other_stub = DbManager.create_record(
+        schemas.Workspace(team_id="TD", workspace_name=None, instance_id=other.instance_id)
+    )
+    group = DbManager.create_record(
+        schemas.WorkspaceGroup(
+            name="A Group",
+            invite_code="AGRP-0002",
+            status="active",
+            created_at=now,
+            uid="a-group",
+        )
+    )
+    DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=workspace_a.id,
+            status="active",
+            role="owner",
+            joined_at=now,
+        )
+    )
+    narrowed = _narrow_import_map(
+        {"TA": workspace_a.id, "TC": partner_stub.id, "TD": other_stub.id},
+        workspace_a,
+        partner,
+    )
+    assert set(narrowed) == {"TA", "TC"}
+    import_migration_data(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [
+                {
+                    "uid": "a-group",
+                    "name": "A Group",
+                    "role": "owner",
+                    "member_workspaces": [
+                        {"team_id": "TC", "role": "member"},
+                        {"team_id": "TD", "role": "member"},
+                    ],
+                }
+            ],
+            "syncs": [{"uid": "a-sync", "group_uid": "a-group", "title": "A Sync"}],
+            "sync_channels": [
+                {"sync_uid": "a-sync", "team_id": "TC", "channel_id": "CPART"},
+                {"sync_uid": "a-sync", "team_id": "TD", "channel_id": "COTHER"},
+            ],
+        },
+        workspace_a.id,
+        team_id_to_workspace_id=narrowed,
+    )
+    members = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [schemas.WorkspaceGroupMember.group_id == group.id, schemas.WorkspaceGroupMember.deleted_at.is_(None)],
+    )
+    assert {row.workspace_id for row in members} == {workspace_a.id, partner_stub.id}
+    assert DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.channel_id == "CPART"])
+    assert DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.channel_id == "COTHER"]) == []

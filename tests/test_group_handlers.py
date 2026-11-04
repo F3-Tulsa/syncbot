@@ -376,3 +376,26 @@ class TestCreateGroupSubmitMintsUid:
         assert created[0].__class__.__name__ == "WorkspaceGroup"
         assert created[0].uid
         assert len(created[0].uid) == 36
+
+    def test_group_created_is_logged_without_an_invite_code(self, caplog):
+        import logging
+
+        workspace = SimpleNamespace(id=10, team_id="T1", deleted_at=None)
+        client = MagicMock()
+        client.conversations_open.return_value = {"channel": {"id": "D1"}}
+
+        def create_record(record):
+            record.id = 4
+            return record
+
+        with (
+            patch("handlers.group._get_authorized_workspace", return_value=("U1", workspace)),
+            patch("handlers.group._get_text_input_value", return_value="Shared"),
+            patch("handlers.group.DbManager.create_record", side_effect=create_record),
+            patch("handlers.group.builders.refresh_home_tab_for_workspace"),
+            caplog.at_level(logging.INFO),
+        ):
+            handle_create_group_submit({"view": {"team_id": "T1"}}, client, MagicMock(), {})
+        created_logs = [record for record in caplog.records if record.message == "group_created"]
+        assert created_logs
+        assert "invite_code" not in created_logs[0].__dict__

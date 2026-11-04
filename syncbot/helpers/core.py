@@ -202,8 +202,6 @@ def format_admin_label(client, user_id: str, workspace) -> str:
 
 
 _PREFIXED_ACTIONS = (
-    actions.CONFIG_PAIRING_REQUEST_APPROVE,
-    actions.CONFIG_PAIRING_REQUEST_DECLINE,
     actions.CONFIG_LEAVE_EXTERNAL_CONNECTION,
     actions.CONFIG_EDIT_EXTERNAL_CONNECTION,
     actions.CONFIG_VERIFY_EXTERNAL_CONNECTION,

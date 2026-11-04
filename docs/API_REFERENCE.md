@@ -18,7 +18,7 @@ There are no slash commands.
 
 These paths exist only when **Federation** is on in Settings. Otherwise the instance returns **404** for every `/api/federation*` path, including ping.
 
-Once the request has the `SyncBot-Federation` User-Agent and federation is on, missing or malformed headers are **400** and a well-formed but untrusted signature is **401**. **404** is for no User-Agent, federation off, an unknown path, an unknown pairing code, or a missing channel/group/sync after a good verify.
+Once the request has the `SyncBot-Federation` User-Agent and federation is on, missing or malformed headers are **400** and a well-formed but untrusted signature is **401**. **404** is for no User-Agent, federation off, an unknown path, an unknown pairing code, or a missing channel/group/sync after a good verify. A request whose sender id is this instance's own id is refused. A signed `/pair` whose code is already used answers 200 when that peer is already connected and trusted, with the same public key.
 
 | Status | When |
 |--------|------|
@@ -51,6 +51,7 @@ Inbound message and reaction endpoints resolve the addressed `SyncChannel` as a 
 When a channel sync includes a federated workspace, this instance POSTs to the peer's federation endpoint and appends the resource subpath (`/pair`, `/message`, `/message/edit`, `/message/delete`, `/message/react`, `/users`, `/teams`, `/file/offer`, `/file`, and group/sync replication routes).
 
 - Every outbound federation call is a POST. `GET /api/federation/ping` is inbound only: this instance answers a peer's ping but never sends one.
+- Before each attempt, the peer URL must be `https` outside local development, carry no user name or password, and resolve only to public addresses. Redirects are not followed, and a 3xx fails the call.
 - The connection code's `webhook_url` is that full endpoint (this instance serves it at `/api/federation`). The mount path travels in the code and is not assumed by the sender.
 - Connection codes are signed JSON (webhook URL, instance id, public key, optional connection `label` and `primary_team_id`, and `sig`). `primary_workspace_name` is display only and is not signed. The instance id is the SHA-256 fingerprint of the Ed25519 public key.
 - Hosted Slack file bytes are offered and posted as raw parts (`/file/offer`, `/file`) before the envelope. Public GIF/image URLs still travel on the envelope. Parts are encrypted at rest until assembled and are omitted from backup and export.
