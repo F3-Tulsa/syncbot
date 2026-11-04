@@ -71,7 +71,7 @@ Slack documents this in [Manage app approval for your workspace](https://slack.c
 
 ## Workspace Groups
 
-Workspaces must belong to the same **group** before they can sync channels or map users. Admins can create a new group (which generates an invite code) or join an existing group by entering a code. A workspace can be in multiple groups with different combinations of other workspaces.
+Workspaces must belong to the same **group** before they can sync channels or map users. Admins can create a new group (which generates an invite code) or join an existing group by entering a code. Removing a workspace from a group gives the group a new invite code, so the old code stops working. A workspace can be in multiple groups with different combinations of other workspaces.
 
 ### Group owners
 
@@ -155,7 +155,8 @@ The Home tab has a **Refresh** button in **SyncBot Configuration** for everyone,
 On the **same instance**, Slack-hosted files of any type (photos, video, PDFs, audio, zips, and so on) are downloaded from the source and uploaded to each target channel, including files shared in a thread and also-send-to-channel replies. Slack allows files up to 1 GB.
 
 - Slack often uploads the file a moment before it shares it into the Channel. SyncBot still copies that share.
-- If a file cannot be copied, SyncBot DMs you with the error. The usual Free-plan stop is a workspace whose file storage is full.
+- If a Slack-hosted file cannot be copied, SyncBot DMs you with the error. The usual Free-plan stop is a workspace whose file storage is full.
+- A file whose copy lives outside Slack, such as a Google Drive or Dropbox file, is posted as its link on every target, on this instance and across External Connections. SyncBot does not download it and does not DM about it.
 - Slack-hosted video and image blocks are not copied as players. The file itself is uploaded so the other workspace can play it.
 - GIFs from the Slack GIF picker or GIPHY stay public image blocks.
 - When the mapped author has authorized SyncBot in the target workspace, the share posts as that person. The file is the message. A caption, Block Kit, or a public GIF stays on that same message.
@@ -183,15 +184,15 @@ Workspaces running their own SyncBot can connect from **External Connections** o
 **Create External Connection** (primary-workspace admin):
 
 1. Name the connection and pick which of this instance's Workspaces the other SyncBot may see. The primary Workspace does not have to be on that list.
-2. SyncBot shows the signed connection code in the modal and DMs a copy (24 hours). The code is signed, so the webhook URL and primary Team ID cannot be swapped in transit. Creating the code can be slow (especially **Approve and Create**, which also signs the migration file). The modal stays open with Close, and SyncBot DMs you when the code is ready.
+2. SyncBot shows the signed connection code in the modal and DMs a copy (24 hours). The code is signed, so the webhook URL and primary Team ID cannot be swapped in transit. Creating the code can be slow. The modal stays open with Close, and SyncBot DMs you when the code is ready.
 3. Home lists that connection immediately: Trust Status `Waiting`, Local Workspaces as you selected, Remote Workspaces `None yet`. **Show Connection Code**, **Edit Connection**, and **Cancel Connection** sit on that row. After 24 hours without a join, the waiting row drops off.
 
-**Join External Connection:** paste the code, review the name, primary Workspace (display only), Team ID, URL, and fingerprint, pick your own allowed Workspaces, and click **Join**.
+**Join External Connection:** paste the code, review the name, primary Workspace (display only), Team ID, URL, and fingerprint, pick your own allowed Workspaces, and click **Join**. A code made on this same instance is refused.
 
 Each connected row shows **Trust Status**, **Local Workspaces**, and **Remote Workspaces** as code ticks.
 
 - **Edit Connection** can rename the connection and change the local Workspaces allowed for that peer (or, on a waiting offer, the Workspaces this instance will share after they join). A Workspace that owns a group with members on this connection must **Give Up Ownership** before it can be removed. After they are removed, the other side's Remote Workspaces update on their next Home open or Refresh. That Workspace is soft-deleted (its Channel rows become `uninstalled`) for the Settings retention window (default 30 days) unless it is allowed again.
-- After they join, this instance pushes the allowlist on pair, on Edit, and on keep-warm (every 5 minutes) so the other side's Remote Workspaces and primary Workspace name stay current. Keep-warm also pushes Groups and Sync Channels for Workspaces on that allowlist so a Workspace that imported its own data is not left waiting for those members to join.
+- After they join, this instance pushes the allowlist on Edit and on keep-warm (every 5 minutes) so the other side's Remote Workspaces and primary Workspace name stay current. The joining instance sends its Workspaces right away. The instance that made the code sends its Workspaces on its next keep-warm, so Remote Workspaces can show `None yet` for up to 5 minutes. Keep-warm also pushes Groups and Sync Channels for Workspaces on that allowlist so a Workspace that imported its own data is not left waiting for those members to join.
 - If Trust Status is `Untrusted` (for example after the other instance reinstalled with a new key), **Verify Trust** shows the primary Workspace, Team ID, URL, fingerprint, and remote Workspaces so you can confirm them out of band before trusting again.
 - **Leave Connection** asks for confirmation, then soft-deletes remote Workspaces on this instance (its Channel rows become `uninstalled`, same retention window as uninstall, default 30 days). Reconnecting that External Connection, or reinstalling SyncBot on the same Workspace, restores groups, Syncs, and message history. After the retention period, that data is deleted. The other instance still lists this connection until they leave too.
 - **Cancel Connection** on a waiting offer deletes the unused code before anyone joins.
@@ -204,7 +205,7 @@ Messages, edits, deletes, reactions, hosted files, and user mapping work across 
 - The receiving instance rewrites `@` mentions and `#` channel links using the same rules as same-instance sync (native `@` tags when mapped; `#channel` stays a source code-tick).
 - If you move an instance to a new hostname but keep the same signing key, create a fresh connection code. The peer updates the URL without requiring a new trust decision.
 
-**Data Migration** on SyncBot Configuration lets any workspace admin export or import this Workspace's SyncBot data. See [Backup and Migration](BACKUP_AND_MIGRATION.md) for the Export, Export and Request Connection, and Import steps.
+**Data Migration** on SyncBot Configuration lets any workspace admin export or import this Workspace's SyncBot data. Import accepts a file exported from this instance or from a connected instance, and it does not create or join an External Connection. A file from another instance is imported only while that connection is active. If SyncBot cannot reach a connected instance, or that instance does not accept the check, the import still runs, the Syncs stay waiting, and the DM says what to do next. See [Backup and Migration](BACKUP_AND_MIGRATION.md) for Export and Import.
 
 ## Backup / Restore
 

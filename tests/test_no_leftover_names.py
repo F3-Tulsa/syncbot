@@ -129,6 +129,8 @@ LEFTOVER_NAMES = (
     "data_migration_request",
     "pairing_request_approve",
     "pairing_request_decline",
+    "Export and Request Connection",
+    "Approve and Create",
 )
 
 # A whole identifier: no identifier character on either side, so
