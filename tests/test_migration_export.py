@@ -427,7 +427,7 @@ def test_import_post_meta_onto_peer_stub_channels():
         patch("helpers.workspace_kind.ensure_stub_workspace") as ensure_stub,
         patch("helpers.export_import.get_workspace_by_id", return_value=None),
     ):
-        import_migration_data(data, 42, 3, team_id_to_workspace_id={"T1": 42})
+        import_migration_data(data, 42, 3, team_id_to_workspace_id={"T1": 42, "T-PEER": 99})
     ensure_stub.assert_not_called()
 
     channels = {row.channel_id: row for row in created if type(row).__name__ == "SyncChannel"}
@@ -736,6 +736,322 @@ def test_import_does_not_revive_a_disbanded_group(real_db):
         [schemas.UserMapping.source_user_id == "U9"],
     )
     assert revived_maps == []
+
+
+def _two_local_workspaces():
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    instance_id = get_instance_id()
+    workspace_a = DbManager.create_record(
+        schemas.Workspace(team_id="TA", workspace_name="Workspace A", instance_id=instance_id)
+    )
+    workspace_b = DbManager.create_record(
+        schemas.Workspace(team_id="TB", workspace_name="Workspace B", instance_id=instance_id)
+    )
+    group = DbManager.create_record(
+        schemas.WorkspaceGroup(
+            name="B Group",
+            invite_code="BGRP-0001",
+            status="active",
+            created_at=now,
+            uid="b-group",
+        )
+    )
+    DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=workspace_b.id,
+            status="active",
+            role="owner",
+            joined_at=now,
+        )
+    )
+    sync = DbManager.create_record(schemas.Sync(uid="b-sync", title="B Sync", group_id=group.id, sync_mode="group"))
+    DbManager.create_record(
+        schemas.SyncChannel(
+            sync_id=sync.id,
+            workspace_id=workspace_b.id,
+            channel_id="CGEN",
+            channel_name="general",
+            status="active",
+            publishes=True,
+            subscribes=True,
+            created_at=now,
+        )
+    )
+    return workspace_a, workspace_b, group, sync
+
+
+def test_import_leaves_another_local_workspace_unchanged(real_db):
+    from db import DbManager, schemas
+    from helpers.export_import import import_migration_data
+
+    workspace_a, workspace_b, b_sync_group, b_sync = _two_local_workspaces()
+    import_migration_data(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [
+                {
+                    "uid": "a-group",
+                    "name": "A Group",
+                    "role": "owner",
+                    "member_workspaces": [{"team_id": "TB", "role": "member", "workspace_name": "Workspace B"}],
+                }
+            ],
+            "syncs": [{"uid": "a-sync", "group_uid": "a-group", "title": "A Sync"}],
+            "sync_channels": [{"sync_uid": "a-sync", "team_id": "TB", "channel_id": "CGEN", "channel_name": "general"}],
+            "user_mappings": [],
+        },
+        workspace_a.id,
+        team_id_to_workspace_id={"TA": workspace_a.id},
+    )
+    a_group = DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.uid == "a-group"])[0]
+    members = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [
+            schemas.WorkspaceGroupMember.group_id == a_group.id,
+            schemas.WorkspaceGroupMember.deleted_at.is_(None),
+        ],
+    )
+    assert {row.workspace_id for row in members} == {workspace_a.id}
+    a_sync = DbManager.find_records(schemas.Sync, [schemas.Sync.uid == "a-sync"])[0]
+    assert (
+        DbManager.find_records(
+            schemas.SyncChannel,
+            [
+                schemas.SyncChannel.sync_id == a_sync.id,
+                schemas.SyncChannel.workspace_id == workspace_b.id,
+            ],
+        )
+        == []
+    )
+    original = DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.channel_id == "CGEN"])[0]
+    assert original.sync_id == b_sync.id
+    assert original.workspace_id == workspace_b.id
+    assert b_sync_group.id == b_sync.group_id
+
+
+def test_import_skips_a_group_this_workspace_is_not_in(real_db):
+    from db import DbManager, schemas
+    from helpers.export_import import import_migration_data
+
+    workspace_a, workspace_b, group, _sync = _two_local_workspaces()
+    import_migration_data(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [{"uid": "b-group", "name": "B Group", "role": "owner"}],
+            "syncs": [{"uid": "b-sync", "group_uid": "b-group", "title": "Taken"}],
+            "sync_channels": [],
+        },
+        workspace_a.id,
+        team_id_to_workspace_id={"TA": workspace_a.id},
+    )
+    members = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [schemas.WorkspaceGroupMember.group_id == group.id],
+    )
+    assert [row.workspace_id for row in members] == [workspace_b.id]
+    assert members[0].role == "owner"
+    kept = DbManager.find_records(schemas.Sync, [schemas.Sync.uid == "b-sync"])[0]
+    assert kept.title == "B Sync"
+    assert kept.group_id == group.id
+
+
+def test_import_keeps_an_existing_sync_in_its_group(real_db):
+    from db import DbManager, schemas
+    from helpers.export_import import import_migration_data
+
+    workspace_a, _workspace_b, group, _sync = _two_local_workspaces()
+    import_migration_data(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [{"uid": "a-group", "name": "A Group", "role": "owner"}],
+            "syncs": [{"uid": "b-sync", "group_uid": "a-group", "title": "Moved"}],
+            "sync_channels": [{"sync_uid": "b-sync", "team_id": "TB", "channel_id": "CGEN"}],
+        },
+        workspace_a.id,
+        team_id_to_workspace_id={"TA": workspace_a.id},
+    )
+    kept = DbManager.find_records(schemas.Sync, [schemas.Sync.uid == "b-sync"])[0]
+    assert kept.group_id == group.id
+    assert kept.title == "B Sync"
+    a_sync_channels = DbManager.find_records(schemas.Sync, [schemas.Sync.uid == "a-group"])
+    assert a_sync_channels == []
+
+
+def test_import_skips_a_mapping_onto_another_local_workspace(real_db):
+    from db import DbManager, schemas
+    from helpers.export_import import import_migration_data
+
+    workspace_a, workspace_b, _group, _sync = _two_local_workspaces()
+    import_migration_data(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [{"uid": "a-group", "name": "A Group", "role": "member"}],
+            "syncs": [],
+            "sync_channels": [],
+            "user_mappings": [
+                {
+                    "source_team_id": "TA",
+                    "target_team_id": "TB",
+                    "source_user_id": "UA",
+                    "target_user_id": "UB",
+                    "map_method": "manual",
+                    "group_uid": "a-group",
+                }
+            ],
+        },
+        workspace_a.id,
+        team_id_to_workspace_id={"TA": workspace_a.id},
+    )
+    assert (
+        DbManager.find_records(
+            schemas.UserMapping,
+            [schemas.UserMapping.target_workspace_id == workspace_b.id],
+        )
+        == []
+    )
+
+
+def test_import_writes_a_stub_already_in_the_group(real_db):
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+    from helpers.export_import import import_migration_data
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    workspace_a = DbManager.create_record(
+        schemas.Workspace(team_id="TA", workspace_name="Workspace A", instance_id=get_instance_id())
+    )
+    peer = DbManager.create_record(
+        schemas.Instance(
+            instance_id="b" * 64,
+            public_key="pem",
+            status="active",
+            trust_status="trusted",
+            name="Partner Org",
+            created_at=now,
+        )
+    )
+    stub = DbManager.create_record(
+        schemas.Workspace(team_id="TC", workspace_name="Workspace C", instance_id=peer.instance_id)
+    )
+    group = DbManager.create_record(
+        schemas.WorkspaceGroup(
+            name="A Group",
+            invite_code="AGRP-0001",
+            status="active",
+            created_at=now,
+            uid="a-group",
+        )
+    )
+    DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=workspace_a.id,
+            status="active",
+            role="owner",
+            joined_at=now,
+        )
+    )
+    import_migration_data(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [
+                {
+                    "uid": "a-group",
+                    "name": "A Group",
+                    "role": "owner",
+                    "member_workspaces": [{"team_id": "TC", "role": "member", "workspace_name": "Workspace C"}],
+                }
+            ],
+            "syncs": [{"uid": "a-sync", "group_uid": "a-group", "title": "A Sync"}],
+            "sync_channels": [
+                {"sync_uid": "a-sync", "team_id": "TC", "channel_id": "CSTUB", "channel_name": "general"}
+            ],
+            "post_meta": {"a-sync:CSTUB": [{"post_id": "P1", "ts": "10.000001"}]},
+        },
+        workspace_a.id,
+        team_id_to_workspace_id={"TA": workspace_a.id, "TC": stub.id},
+    )
+    members = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [
+            schemas.WorkspaceGroupMember.group_id == group.id,
+            schemas.WorkspaceGroupMember.deleted_at.is_(None),
+        ],
+    )
+    assert {row.workspace_id for row in members} == {workspace_a.id, stub.id}
+    channel = DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.channel_id == "CSTUB"])[0]
+    assert channel.workspace_id == stub.id
+    assert DbManager.find_records(schemas.PostMeta, [schemas.PostMeta.sync_channel_id == channel.id])
+
+
+def test_prepare_maps_only_this_workspace_and_live_stubs(real_db):
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+    from handlers.export_import import _data_migration_prepare
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    workspace_a, workspace_b, _group, _sync = _two_local_workspaces()
+    peer = DbManager.create_record(
+        schemas.Instance(
+            instance_id="c" * 64,
+            public_key="pem",
+            status="active",
+            trust_status="trusted",
+            name="Partner Org",
+            created_at=now,
+        )
+    )
+    stub = DbManager.create_record(
+        schemas.Workspace(team_id="TC", workspace_name="Workspace C", instance_id=peer.instance_id)
+    )
+    DbManager.create_record(
+        schemas.Workspace(
+            team_id="TD",
+            workspace_name="Workspace D",
+            instance_id=get_instance_id(),
+            deleted_at=now,
+        )
+    )
+    DbManager.create_record(
+        schemas.Workspace(
+            team_id="TE",
+            workspace_name="Workspace E",
+            instance_id=peer.instance_id,
+            deleted_at=now,
+        )
+    )
+    body = {
+        "user": {"id": "U1"},
+        "team": {"id": "TA"},
+        "view": {
+            "state": {
+                "values": {
+                    "data_migration_json_input": {
+                        "data_migration_json_input": {
+                            "files": [{"url_private_download": "https://files.slack.com/m.json"}],
+                        }
+                    }
+                }
+            }
+        },
+    }
+    payload = {"version": 1, "workspace": {"team_id": "TA"}, "groups": []}
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(json.dumps(payload), None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace_a),
+    ):
+        err, _data, group_id, team_map, _workspace = _data_migration_prepare(body, MagicMock(token="xoxb"), {})
+    assert err is None
+    assert group_id == 0
+    assert set(team_map) == {"TA", "TC"}
+    assert team_map["TA"] == workspace_a.id
+    assert team_map["TC"] == stub.id
+    assert workspace_b.id not in team_map.values()
 
 
 def test_confirm_import_does_not_add_a_status_line():

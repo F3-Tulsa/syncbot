@@ -84,6 +84,16 @@ def test_import_keeps_an_active_channel_and_pends_a_new_one(real_db):
 
     workspace = _workspace()
     group, sync, row = _sync_and_channel(workspace)
+    now = datetime.now(UTC).replace(tzinfo=None)
+    DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=workspace.id,
+            status="active",
+            role="member",
+            joined_at=now,
+        )
+    )
     data = {
         "workspace": {"team_id": "TLOCAL"},
         "groups": [{"uid": group.uid, "name": "Group", "role": "member", "member_workspaces": []}],

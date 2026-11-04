@@ -343,7 +343,7 @@ class TestDataMigrationImportConnect:
             patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
             patch(
                 "handlers.export_import.DbManager.find_records",
-                side_effect=[[], [], [SimpleNamespace(team_id="T3")]],
+                side_effect=[[], [], [SimpleNamespace(team_id="T3")], []],
             ),
             patch("handlers.export_import.ei.verify_migration_signature", return_value=True),
             patch("handlers.export_import.helpers.federation_enabled", return_value=True),
@@ -363,6 +363,48 @@ class TestDataMigrationImportConnect:
         assert "includes this Workspace" in text
         radio = next(block["element"] for block in resp["view"]["blocks"] if block.get("type") == "input")
         assert radio["initial_option"]["value"] == "wait"
+
+    def test_review_names_a_group_this_workspace_is_not_in(self):
+        from types import SimpleNamespace
+
+        from handlers.export_import import handle_data_migration_submit_ack
+
+        payload = {
+            "version": 1,
+            "workspace": {"team_id": "T1"},
+            "groups": [{"uid": "b-group", "name": "B Group"}],
+        }
+        workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
+        group = SimpleNamespace(id=5, name="B Group", status="active", uid="b-group")
+        body = {
+            "user": {"id": "U1"},
+            "team": {"id": "T1"},
+            "view": {
+                "state": {
+                    "values": {
+                        actions.CONFIG_DATA_MIGRATION_JSON_INPUT: {
+                            actions.CONFIG_DATA_MIGRATION_JSON_INPUT: {
+                                "files": [{"url_private_download": "https://files.slack.com/m.json"}],
+                            }
+                        }
+                    }
+                }
+            },
+        }
+        with (
+            patch("handlers.export_import._is_admin", return_value=True),
+            patch("handlers.export_import._download_uploaded_file", return_value=(json.dumps(payload), None)),
+            patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
+            patch("handlers.export_import.DbManager.find_records", side_effect=[[], [group], []]),
+            patch("handlers.export_import.ei.verify_migration_signature", return_value=True),
+            patch("handlers.export_import.helpers.federation_enabled", return_value=True),
+            patch("helpers._cache._cache_set"),
+        ):
+            resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+        text = str(resp["view"])
+        assert (
+            "`B Group` is already on this install, and this Workspace is not in it, " "so Import leaves it out."
+        ) in text
 
     def test_import_does_not_open_a_connection(self):
         from types import SimpleNamespace

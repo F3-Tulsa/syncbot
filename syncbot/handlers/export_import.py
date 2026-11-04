@@ -632,10 +632,14 @@ def _data_migration_prepare(
         )
 
     team_id_to_workspace_id = {workspace_record.team_id: workspace_record.id}
-    workspaces_b = DbManager.find_records(schemas.Workspace, [])
-    for w in workspaces_b:
-        if w.team_id:
-            team_id_to_workspace_id[w.team_id] = w.id
+    for row in DbManager.find_records(
+        schemas.Workspace,
+        [schemas.Workspace.deleted_at.is_(None)],
+    ):
+        if not row.team_id or row.team_id in team_id_to_workspace_id:
+            continue
+        if helpers.is_stub_workspace(row):
+            team_id_to_workspace_id[row.team_id] = row.id
 
     return None, data, 0, team_id_to_workspace_id, workspace_record
 
@@ -767,6 +771,58 @@ def _migration_workspace_names_not_here(data: dict, this_team_id: str) -> list[s
             missing.append(name)
     missing.sort(key=str.lower)
     return missing
+
+
+def _migration_groups_not_joined(data: dict, workspace_id: int) -> list[str]:
+    """Names of active Groups in the file that this Workspace is not a member of."""
+    names: list[str] = []
+    for group in data.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        uid = str(group.get("uid") or "").strip()
+        if not uid:
+            continue
+        rows = DbManager.find_records(
+            schemas.WorkspaceGroup,
+            [
+                schemas.WorkspaceGroup.uid == uid,
+                schemas.WorkspaceGroup.status == "active",
+            ],
+        )
+        if not rows:
+            continue
+        row = rows[0]
+        members = DbManager.find_records(
+            schemas.WorkspaceGroupMember,
+            [
+                schemas.WorkspaceGroupMember.group_id == row.id,
+                schemas.WorkspaceGroupMember.workspace_id == workspace_id,
+                schemas.WorkspaceGroupMember.status == "active",
+                schemas.WorkspaceGroupMember.deleted_at.is_(None),
+            ],
+        )
+        if members:
+            continue
+        name = str(getattr(row, "name", "") or group.get("name") or "").strip()
+        if name:
+            names.append(name)
+    names.sort(key=str.lower)
+    return names
+
+
+def _left_out_groups_text(names: list[str]) -> str:
+    label = _format_workspace_names(names)
+    if len(names) == 1:
+        return (
+            f":warning: {label} is already on this install, and this Workspace is not in it, "
+            "so Import leaves it out. Ask an Owner of that Group to invite this Workspace, "
+            "then import this file again."
+        )
+    return (
+        f":warning: {label} are already on this install, and this Workspace is not in them, "
+        "so Import leaves them out. Ask an Owner of each Group to invite this Workspace, "
+        "then import this file again."
+    )
 
 
 def _format_workspace_names(names: list[str]) -> str:
@@ -932,6 +988,9 @@ def handle_data_migration_submit_ack(
     missing = _migration_workspace_names_not_here(data, workspace_record.team_id)
     if missing:
         blocks.append(section(_import_missing_workspace_text(missing, finished=False)))
+    left_out = _migration_groups_not_joined(data, workspace_record.id)
+    if left_out:
+        blocks.append(section(_left_out_groups_text(left_out)))
     blocks.append(section(_IMPORT_FINISH_HELP))
     blocks.append(_migration_finish_block())
     blocks.extend(_migration_overview_blocks(data))

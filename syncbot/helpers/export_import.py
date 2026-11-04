@@ -620,17 +620,29 @@ def _workspace_id_for_imported_team(
     this_workspace_id: int,
     team_id_to_workspace_id: dict[str, int],
 ) -> int | None:
-    """Resolve a Slack Team ID from the file to an existing workspace PK (live or stub)."""
+    """Resolve a Slack team id from the import map.
+
+    A blank team id is the importing Workspace. Any other team that the map
+    does not already name is left out. This does not look a team up.
+    """
     tid = (team_id or "").strip()
     if not tid:
         return this_workspace_id
-    if tid in team_id_to_workspace_id:
-        return team_id_to_workspace_id[tid]
-    matches = DbManager.find_records(schemas.Workspace, [schemas.Workspace.team_id == tid])
-    if matches and getattr(matches[0], "id", None):
-        team_id_to_workspace_id[tid] = matches[0].id
-        return matches[0].id
-    return None
+    return team_id_to_workspace_id.get(tid)
+
+
+def _workspace_is_active_group_member(group_id: int, workspace_id: int) -> bool:
+    """True when *workspace_id* has an active membership in *group_id*."""
+    rows = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [
+            schemas.WorkspaceGroupMember.group_id == group_id,
+            schemas.WorkspaceGroupMember.workspace_id == workspace_id,
+            schemas.WorkspaceGroupMember.status == "active",
+            schemas.WorkspaceGroupMember.deleted_at.is_(None),
+        ],
+    )
+    return bool(rows)
 
 
 def _ensure_group_membership(group_id: int, workspace_id: int, *, role, now) -> None:
@@ -678,7 +690,10 @@ def import_migration_data(
         existing = DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.uid == uid])
         if existing and not _group_is_active(existing[0]):
             continue
+        creating = not existing
         if existing:
+            if not _workspace_is_active_group_member(existing[0].id, workspace_id):
+                continue
             group = existing[0]
         else:
             group = DbManager.create_record(
@@ -693,6 +708,8 @@ def import_migration_data(
         group_uid_to_id[uid] = group.id
         this_role = group_entry.get("role") or "member"
         _ensure_group_membership(group.id, workspace_id, role=this_role, now=now)
+        if creating:
+            continue
         named_members = group_entry.get("member_workspaces") or []
         if named_members:
             others = named_members
@@ -720,6 +737,8 @@ def import_migration_data(
         existing = DbManager.find_records(schemas.Sync, [schemas.Sync.uid == uid])
         if existing:
             sync = existing[0]
+            if sync.group_id != target_group_id:
+                continue
             DbManager.update_records(
                 schemas.Sync,
                 [schemas.Sync.id == sync.id],
@@ -830,7 +849,7 @@ def import_migration_data(
                     parent_post_id=post_meta.get("parent_post_id"),
                     reaction=post_meta.get("reaction"),
                     source_user_id=post_meta.get("source_user_id"),
-                    source_workspace_id=team_id_to_workspace_id.get(source_team_id) if source_team_id else None,
+                    source_workspace_id=(team_id_to_workspace_id.get(source_team_id) if source_team_id else None),
                     posted_as_user_id=post_meta.get("posted_as_user_id"),
                 )
             )
@@ -860,11 +879,17 @@ def import_migration_data(
         mapped_group_uid = str(um.get("group_uid") or "").strip()
         if mapped_group_uid and mapped_group_uid not in group_uid_to_id:
             continue
-        src_team = um.get("source_team_id")
-        tgt_team = um.get("target_team_id")
-        src_ws_id = team_id_to_workspace_id.get(src_team) if src_team else None
-        tgt_ws_id = team_id_to_workspace_id.get(tgt_team) if tgt_team else None
-        if not src_ws_id or not tgt_ws_id:
+        src_ws_id = _workspace_id_for_imported_team(
+            str(um.get("source_team_id") or "") or None,
+            this_workspace_id=workspace_id,
+            team_id_to_workspace_id=team_id_to_workspace_id,
+        )
+        tgt_ws_id = _workspace_id_for_imported_team(
+            str(um.get("target_team_id") or "") or None,
+            this_workspace_id=workspace_id,
+            team_id_to_workspace_id=team_id_to_workspace_id,
+        )
+        if not src_ws_id or not tgt_ws_id or workspace_id not in (src_ws_id, tgt_ws_id):
             continue
         existing = DbManager.find_records(
             schemas.UserMapping,
