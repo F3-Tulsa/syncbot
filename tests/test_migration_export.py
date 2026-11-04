@@ -61,6 +61,32 @@ class TestBuildMigrationExportWorkspaceLookup:
         ):
             build_migration_export(99)
 
+    def test_raises_when_the_file_cannot_be_signed(self):
+        workspace = SimpleNamespace(
+            id=42,
+            team_id="T1",
+            workspace_name="Workspace A",
+            deleted_at=None,
+        )
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        from federation.core import public_key_fingerprint
+
+        key = Ed25519PrivateKey.generate()
+        pem = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+        fingerprint = public_key_fingerprint(pem)
+        with (
+            patch("helpers.export_import.get_workspace_by_id", return_value=workspace),
+            patch("helpers.export_import.DbManager.find_records", return_value=[]),
+            patch("helpers.export_import.os.environ.get", return_value=""),
+            patch("federation.core.get_or_create_instance_keypair", return_value=(key, pem)),
+            patch("federation.core.get_instance_id", return_value=fingerprint),
+            patch("federation.core.sign_body", side_effect=RuntimeError),
+            pytest.raises(RuntimeError),
+        ):
+            build_migration_export(42)
+
     def test_exports_channel_participation_and_posting_identity(self):
         workspace = SimpleNamespace(id=42, team_id="T1", workspace_name="Workspace A", deleted_at=None)
         sync = SimpleNamespace(
@@ -102,6 +128,13 @@ class TestBuildMigrationExportWorkspaceLookup:
                 "UserMapping": [],
             }.get(model.__name__, [])
 
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        from federation.core import public_key_fingerprint
+
+        key = Ed25519PrivateKey.generate()
+        pem = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
         with (
             patch("helpers.export_import.get_workspace_by_id", return_value=workspace),
             patch("helpers.export_import.DbManager.find_records", side_effect=find_records),
@@ -109,6 +142,8 @@ class TestBuildMigrationExportWorkspaceLookup:
                 "helpers.export_import.DbManager.get_record",
                 side_effect=lambda model, *args, **kwargs: group if model.__name__ == "WorkspaceGroup" else sync,
             ),
+            patch("federation.core.get_or_create_instance_keypair", return_value=(key, pem)),
+            patch("federation.core.get_instance_id", return_value=public_key_fingerprint(pem)),
         ):
             payload = build_migration_export(42)
 
@@ -191,6 +226,13 @@ class TestBuildMigrationExportWorkspaceLookup:
         def get_ws(pk):
             return local if pk == 42 else peer
 
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        from federation.core import public_key_fingerprint
+
+        key = Ed25519PrivateKey.generate()
+        pem = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
         with (
             patch("helpers.export_import.get_workspace_by_id", side_effect=get_ws),
             patch("helpers.export_import.DbManager.find_records", side_effect=find_records),
@@ -198,6 +240,8 @@ class TestBuildMigrationExportWorkspaceLookup:
                 "helpers.export_import.DbManager.get_record",
                 side_effect=lambda model, *args, **kwargs: group if model.__name__ == "WorkspaceGroup" else sync,
             ),
+            patch("federation.core.get_or_create_instance_keypair", return_value=(key, pem)),
+            patch("federation.core.get_instance_id", return_value=public_key_fingerprint(pem)),
         ):
             payload = build_migration_export(42)
 

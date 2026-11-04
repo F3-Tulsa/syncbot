@@ -189,6 +189,24 @@ class TestDataMigrationModal:
         assert view["blocks"][0]["text"]["text"] == _DM_WAIT_TEXT
         assert view.get("submit") is None
 
+    def test_export_that_fails_sends_no_file(self):
+        from types import SimpleNamespace
+
+        from handlers.export_import import handle_data_migration_export
+
+        client = MagicMock()
+        body = {"user": {"id": "U1"}, "team": {"id": "T1"}, "view": {"id": "V1"}}
+        workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A", deleted_at=None)
+        with (
+            patch("handlers.export_import._is_admin", return_value=True),
+            patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
+            patch("handlers.export_import.ei.build_migration_export", side_effect=RuntimeError),
+            patch("handlers.export_import._close_modal_done") as close,
+        ):
+            handle_data_migration_export(body, client, MagicMock(), {})
+        client.files_upload_v2.assert_not_called()
+        assert close.call_args.args[2] == (":warning: SyncBot could not send the migration file. Try Export again.")
+
     def test_wrong_workspace_names_the_file(self):
         from types import SimpleNamespace
 

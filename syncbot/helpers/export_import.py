@@ -20,7 +20,7 @@ import constants
 from db import DbManager, get_engine, schemas
 from helpers.user_action_echo import post_meta_ts, slack_message_ts
 from helpers.workspace import get_workspace_by_id
-from logger import log_info, log_warning
+from logger import log_info
 
 # Dump-format integers. Bump when the JSON shape is incompatible with this
 # restore/import path. ``syncbot_version`` is the running package label only.
@@ -561,28 +561,21 @@ def build_migration_export(workspace_id: int) -> dict:
     }
 
     # Sign with Ed25519. source_instance is inside the signed bytes.
-    try:
-        from federation import core as federation
+    from federation import core as federation
 
-        _, public_key = federation.get_or_create_instance_keypair()
-        payload["source_instance"] = {
-            "instance_id": federation.get_instance_id(),
-            "public_key": public_key,
-        }
-        payload["signed_at"] = datetime.now(UTC).isoformat() + "Z"
-        to_sign = {k: v for k, v in payload.items() if k != "signature"}
-        raw = canonical_json_dumps(to_sign).decode("utf-8")
-        payload["signature"] = federation.sign_body(raw)
-    except Exception as e:
-        payload.pop("source_instance", None)
-        payload.pop("signed_at", None)
-        payload.pop("signature", None)
-        log_warning("build_migration_export", error=str(e))
+    _, public_key = federation.get_or_create_instance_keypair()
+    payload["source_instance"] = {
+        "instance_id": federation.get_instance_id(),
+        "public_key": public_key,
+    }
+    payload["signed_at"] = datetime.now(UTC).isoformat() + "Z"
+    to_sign = {k: v for k, v in payload.items() if k != "signature"}
+    raw = canonical_json_dumps(to_sign).decode("utf-8")
+    payload["signature"] = federation.sign_body(raw)
 
     log_info(
         "migration_export",
         team_id=team_id,
-        signed=bool(payload.get("signature")),
         groups=len(groups_data),
         syncs=len(syncs_data),
         channels=len(sync_channels_data),
