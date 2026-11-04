@@ -1070,9 +1070,60 @@ def test_confirm_import_does_not_add_a_status_line():
     )
     text = "\n".join(getattr(block, "label", "") or "" for block in blocks)
     assert "Partner Org" in text
+    assert "• `Partner Org`: 1 Sync (`Announcements`), 1 Channel, 0 messages" in text
     assert "Deleted Status" not in text
     assert "Disbanded" not in text
     assert "\nStatus:" not in text
+    assert "people are mapped" not in text
+
+
+def test_overview_uses_plain_counts():
+    from handlers.export_import import _migration_overview_blocks
+
+    channels = [{"sync_uid": "daily" if index < 3 else "news", "channel_id": f"C{index}"} for index in range(6)]
+    blocks = _migration_overview_blocks(
+        {
+            "groups": [
+                {"uid": "live", "name": "Live Group"},
+                {"uid": "empty", "name": "Empty Group"},
+            ],
+            "syncs": [
+                {"uid": "daily", "group_uid": "live", "title": "Daily"},
+                {"uid": "news", "group_uid": "live", "title": "Announcements"},
+            ],
+            "sync_channels": channels,
+            "user_mappings": [{"source_user_id": f"U{index}"} for index in range(12)],
+            "post_meta": {"daily:C0": [{"kind": "message", "post_id": str(index)} for index in range(1204)]},
+        }
+    )
+    text = "\n".join(getattr(block, "label", "") or "" for block in blocks)
+    assert "*What's in it*" in text
+    assert "• `Live Group`: 2 Syncs (`Daily`, `Announcements`), 6 Channels, 1,204 messages" in text
+    assert "• `Empty Group`: no Syncs" in text
+    assert text.count("12 people are mapped between Workspaces.") == 1
+
+
+def test_overview_uses_singular_words_and_says_when_there_are_no_groups():
+    from handlers.export_import import _migration_overview_blocks
+
+    one = _migration_overview_blocks(
+        {
+            "groups": [{"uid": "live", "name": "Live Group"}],
+            "syncs": [{"uid": "daily", "group_uid": "live", "title": "Daily"}],
+            "sync_channels": [{"sync_uid": "daily", "channel_id": "C1"}],
+            "user_mappings": [{"source_user_id": "U1"}],
+            "post_meta": {"daily:C1": [{"kind": "message", "post_id": "p1"}]},
+        }
+    )
+    text = "\n".join(getattr(block, "label", "") or "" for block in one)
+    assert "• `Live Group`: 1 Sync (`Daily`), 1 Channel, 1 message" in text
+    assert "1 person is mapped between Workspaces." in text
+
+    empty = _migration_overview_blocks({"groups": [], "syncs": [], "sync_channels": [], "user_mappings": []})
+    empty_text = "\n".join(getattr(block, "label", "") or "" for block in empty)
+    assert "No Groups." in empty_text
+    assert "•" not in empty_text
+    assert "mapped" not in empty_text
 
 
 def _upload_body(payload):

@@ -161,8 +161,9 @@ class TestDataMigrationModal:
         text = str(view)
         assert ":outbox_tray: Export" in text
         assert ":link:" not in text
-        assert "as a DM" in text
-        assert "*Import*" in text
+        assert "sends it to you in a DM" in text
+        assert "no tokens or passwords" in text
+        assert "from this install or from a connected install" in text
 
     def test_export_confirms_in_modal_after_dm(self):
         from types import SimpleNamespace
@@ -186,6 +187,38 @@ class TestDataMigrationModal:
         assert view["close"]["text"] == "Close"
         assert view["blocks"][0]["text"]["text"] == _DM_WAIT_TEXT
         assert view.get("submit") is None
+
+    def test_wrong_workspace_names_the_file(self):
+        from types import SimpleNamespace
+
+        from handlers.export_import import _data_migration_prepare
+
+        payload = {"version": 1, "workspace": {"team_id": "T2", "workspace_name": "Workspace B"}}
+        workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
+        body = {
+            "user": {"id": "U1"},
+            "team": {"id": "T1"},
+            "view": {
+                "state": {
+                    "values": {
+                        actions.CONFIG_DATA_MIGRATION_JSON_INPUT: {
+                            actions.CONFIG_DATA_MIGRATION_JSON_INPUT: {
+                                "files": [{"url_private_download": "https://files.slack.com/m.json"}],
+                            }
+                        }
+                    }
+                }
+            },
+        }
+        with (
+            patch("handlers.export_import._is_admin", return_value=True),
+            patch("handlers.export_import._download_uploaded_file", return_value=(json.dumps(payload), None)),
+            patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
+        ):
+            err, *_rest = _data_migration_prepare(body, MagicMock(token="xoxb"), {})
+        assert err["errors"][actions.CONFIG_DATA_MIGRATION_JSON_INPUT] == (
+            "This file is for `Workspace B`. Open SyncBot in that Workspace to import it."
+        )
 
 
 class TestDataMigrationImportConnect:
@@ -304,10 +337,11 @@ class TestDataMigrationImportConnect:
         assert "Partner Org" not in text
         assert "connection code" not in text
         assert "Workspace Group" in text
-        assert "Synced Channels" in text
-        assert "Mapped Users" in text
-        assert "Synced Messages" in text
-        assert "Announcements" in text
+        assert "1 Sync (`Announcements`)" in text
+        assert "1 Channel" in text
+        assert "1 message" in text
+        assert "1 person is mapped between Workspaces." in text
+        assert text.count("1 person is mapped") == 1
 
     def test_review_names_a_workspace_that_is_not_here(self):
         from types import SimpleNamespace

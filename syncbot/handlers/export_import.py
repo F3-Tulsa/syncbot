@@ -419,8 +419,8 @@ def handle_data_migration(
         orm.SectionBlock(
             label=(
                 "*Export*\n"
-                "Download this Workspace's SyncBot data (Groups, Syncs and Mappings, no tokens or secrets) "
-                "as a JSON file. The file will be sent to you from SyncBot as a DM."
+                "Save this Workspace's Groups, Syncs, and user mappings to a file. "
+                "SyncBot sends it to you in a DM. The file has no tokens or passwords."
             ),
         ),
         orm.ActionsBlock(
@@ -436,7 +436,11 @@ def handle_data_migration(
         [
             orm.DividerBlock(),
             orm.SectionBlock(
-                label="*Import*\nUpload a JSON export file. Existing Groups and Syncs are merged.",
+                label=(
+                    "*Import*\n"
+                    "Upload a file exported from this install or from a connected install. "
+                    "You'll see what's in it before anything changes."
+                ),
             ),
         ]
     )
@@ -618,11 +622,14 @@ def _data_migration_prepare(
 
     workspace_record = helpers.get_workspace_record(team_id, body, context, client)
     if not workspace_record or workspace_record.team_id != export_team_id:
+        file_name = str(workspace_payload.get("workspace_name") or "").strip() or str(export_team_id)
         return (
             {
                 "response_action": "errors",
                 "errors": {
-                    actions.CONFIG_DATA_MIGRATION_JSON_INPUT: "This migration file is for a different workspace. Open the app from the workspace that matches the migration file."
+                    actions.CONFIG_DATA_MIGRATION_JSON_INPUT: (
+                        f"This file is for `{file_name}`. Open SyncBot in that Workspace to import it."
+                    )
                 },
             },
             None,
@@ -660,8 +667,13 @@ def _migration_message_count(post_meta: dict, sync_uid: str, channel_id: str) ->
     return count
 
 
+def _count_phrase(count: int, singular: str, plural: str) -> str:
+    word = singular if count == 1 else plural
+    return f"{count:,} {word}"
+
+
 def _migration_overview_blocks(data: dict) -> list:
-    """Home-style Group / sync / mapping / message counts from migration JSON."""
+    """Plain-language Group, Sync, Channel, and mapping counts from the file."""
     from slack.blocks import section
 
     groups = [item for item in (data.get("groups") or []) if isinstance(item, dict)]
@@ -674,21 +686,16 @@ def _migration_overview_blocks(data: dict) -> list:
         uid = str(channel.get("sync_uid") or "")
         if uid:
             channels_by_sync.setdefault(uid, []).append(channel)
-    mapped_count = len(mappings)
-    blocks = [section("*This file will import*")]
+    blocks = [section("*What's in it*")]
     if not groups:
-        blocks.append(
-            section(
-                f"No Workspace Groups.\nMapped Users: `{mapped_count}`\n"
-                f"Synced Channels: `{len(channels)}`\nSynced Messages: "
-                f"`{sum(_migration_message_count(post_meta, str(s.get('uid') or ''), str(c.get('channel_id') or '')) for s in syncs for c in channels_by_sync.get(str(s.get('uid') or ''), []))}`"
-            )
-        )
-        return blocks
+        blocks.append(section("No Groups."))
     for group in groups:
         uid = str(group.get("uid") or "")
         name = str(group.get("name") or "Unnamed group").strip() or "Unnamed group"
         group_syncs = [item for item in syncs if str(item.get("group_uid") or "") == uid]
+        if not group_syncs:
+            blocks.append(section(f"• `{name}`: no Syncs"))
+            continue
         titles = [str(item.get("title") or "").strip() for item in group_syncs if str(item.get("title") or "").strip()]
         channel_count = 0
         message_count = 0
@@ -698,15 +705,21 @@ def _migration_overview_blocks(data: dict) -> list:
             channel_count += len(sync_channels)
             for channel in sync_channels:
                 message_count += _migration_message_count(post_meta, sync_uid, str(channel.get("channel_id") or ""))
-        title_line = ", ".join(f"`{title}`" for title in titles) if titles else "`None`"
+        title_line = ""
+        if titles:
+            title_line = " (" + ", ".join(f"`{title}`" for title in titles) + ")"
         blocks.append(
             section(
-                f"*{name}*\n"
-                f"Synced Channels: `{channel_count}` {title_line}\n"
-                f"Mapped Users: `{mapped_count}`\n"
-                f"Synced Messages: `{message_count}`"
+                f"• `{name}`: {_count_phrase(len(group_syncs), 'Sync', 'Syncs')}{title_line}, "
+                f"{_count_phrase(channel_count, 'Channel', 'Channels')}, "
+                f"{_count_phrase(message_count, 'message', 'messages')}"
             )
         )
+    mapped_count = len(mappings)
+    if mapped_count == 1:
+        blocks.append(section("1 person is mapped between Workspaces."))
+    elif mapped_count:
+        blocks.append(section(f"{mapped_count:,} people are mapped between Workspaces."))
     return blocks
 
 
