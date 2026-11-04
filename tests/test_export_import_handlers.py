@@ -70,7 +70,7 @@ class TestBackupRestoreSubmitValidation:
                     "values": {
                         actions.CONFIG_BACKUP_RESTORE_JSON_INPUT: {
                             actions.CONFIG_BACKUP_RESTORE_JSON_INPUT: {
-                                "files": [{"url_private_download": "https://files.example/b.json"}],
+                                "files": [{"url_private_download": "https://files.slack.com/b.json"}],
                             }
                         }
                     }
@@ -102,7 +102,7 @@ class TestBackupRestoreSubmitValidation:
                     "values": {
                         actions.CONFIG_BACKUP_RESTORE_JSON_INPUT: {
                             actions.CONFIG_BACKUP_RESTORE_JSON_INPUT: {
-                                "files": [{"url_private_download": "https://files.example/b.json"}],
+                                "files": [{"url_private_download": "https://files.slack.com/b.json"}],
                             }
                         }
                     }
@@ -255,7 +255,7 @@ class TestDataMigrationImportConnect:
                     "values": {
                         actions.CONFIG_DATA_MIGRATION_JSON_INPUT: {
                             actions.CONFIG_DATA_MIGRATION_JSON_INPUT: {
-                                "files": [{"url_private_download": "https://files.example/m.json"}],
+                                "files": [{"url_private_download": "https://files.slack.com/m.json"}],
                             }
                         }
                     }
@@ -307,7 +307,7 @@ class TestDataMigrationImportConnect:
                     "values": {
                         actions.CONFIG_DATA_MIGRATION_JSON_INPUT: {
                             actions.CONFIG_DATA_MIGRATION_JSON_INPUT: {
-                                "files": [{"url_private_download": "https://files.example/m.json"}],
+                                "files": [{"url_private_download": "https://files.slack.com/m.json"}],
                             }
                         }
                     }
@@ -354,11 +354,11 @@ class TestDataMigrationImportConnect:
             "groups": [
                 {
                     "uid": "g1",
-                    "name": "Workspace Group",
+                    "name": "Live Group",
                     "member_workspaces": [
                         {"team_id": "T1", "workspace_name": "Workspace A"},
                         {"team_id": "T2", "workspace_name": "Workspace B"},
-                        {"team_id": "T3", "workspace_name": "Workspace C"},
+                        {"team_id": "T3"},
                     ],
                 }
             ],
@@ -372,7 +372,7 @@ class TestDataMigrationImportConnect:
                     "values": {
                         actions.CONFIG_DATA_MIGRATION_JSON_INPUT: {
                             actions.CONFIG_DATA_MIGRATION_JSON_INPUT: {
-                                "files": [{"url_private_download": "https://files.example/m.json"}],
+                                "files": [{"url_private_download": "https://files.slack.com/m.json"}],
                             }
                         }
                     }
@@ -397,7 +397,7 @@ class TestDataMigrationImportConnect:
         assert resp["view"]["submit"]["text"] == "Import"
         assert "`Workspace B` is not on this instance yet" in text
         assert "will not come over" in text
-        assert "Workspace C" not in text
+        assert "T3" not in text
         assert "connection code" not in text
         assert "exported from this Workspace on this SyncBot instance" in text
         assert "start right away" in text
@@ -690,7 +690,7 @@ class TestDataMigrationImportConnect:
                 {
                     "uid": "b-group",
                     "name": "B Group",
-                    "member_workspaces": [{"team_id": "T2", "workspace_name": "Workspace C"}],
+                    "member_workspaces": [{"team_id": "T2", "workspace_name": "Workspace B"}],
                 }
             ],
         }
@@ -727,7 +727,7 @@ class TestDataMigrationImportConnect:
                 handle_data_migration_review(body, MagicMock(), MagicMock(), {})
             message = dm.call_args.args[2]
             assert expected in message
-            assert "Workspace C" in message
+            assert "Workspace B" in message
             assert "B Group" in message
 
     def test_active_channels_stay_running_when_a_peer_cannot_be_reached(self):

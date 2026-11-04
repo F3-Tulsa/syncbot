@@ -978,7 +978,7 @@ def test_import_writes_a_stub_already_in_the_group(real_db):
         )
     )
     stub = DbManager.create_record(
-        schemas.Workspace(team_id="TC", workspace_name="Workspace C", instance_id=peer.instance_id)
+        schemas.Workspace(team_id="TC", workspace_name="Workspace B", instance_id=peer.instance_id)
     )
     group = DbManager.create_record(
         schemas.WorkspaceGroup(
@@ -1006,7 +1006,7 @@ def test_import_writes_a_stub_already_in_the_group(real_db):
                     "uid": "a-group",
                     "name": "A Group",
                     "role": "owner",
-                    "member_workspaces": [{"team_id": "TC", "role": "member", "workspace_name": "Workspace C"}],
+                    "member_workspaces": [{"team_id": "TC", "role": "member", "workspace_name": "Workspace B"}],
                 }
             ],
             "syncs": [{"uid": "a-sync", "group_uid": "a-group", "title": "A Sync"}],
@@ -1049,12 +1049,12 @@ def test_prepare_maps_only_this_workspace_and_live_stubs(real_db):
         )
     )
     stub = DbManager.create_record(
-        schemas.Workspace(team_id="TC", workspace_name="Workspace C", instance_id=peer.instance_id)
+        schemas.Workspace(team_id="TC", workspace_name="Workspace B", instance_id=peer.instance_id)
     )
     DbManager.create_record(
         schemas.Workspace(
             team_id="TD",
-            workspace_name="Workspace D",
+            workspace_name=None,
             instance_id=get_instance_id(),
             deleted_at=now,
         )
@@ -1062,7 +1062,7 @@ def test_prepare_maps_only_this_workspace_and_live_stubs(real_db):
     DbManager.create_record(
         schemas.Workspace(
             team_id="TE",
-            workspace_name="Workspace E",
+            workspace_name=None,
             instance_id=peer.instance_id,
             deleted_at=now,
         )
@@ -1198,7 +1198,7 @@ def _upload_body(payload):
     }, json.dumps(payload)
 
 
-def _peer_signed_file(*, name="Nope", groups=None):
+def _peer_signed_file(*, name="Workspace B", groups=None):
     import base64
 
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -1308,7 +1308,7 @@ def test_import_names_an_unknown_signer_by_id_prefix(real_db):
 def test_connected_file_is_named_from_the_saved_connection(real_db):
     from helpers.export_import import format_migration_source_name, get_migration_file_status
 
-    payload, instance_id, public_pem = _peer_signed_file(name="Nope")
+    payload, instance_id, public_pem = _peer_signed_file(name="Workspace B")
     peer = _save_peer(instance_id, public_pem, name="Partner Org")
     with patch("helpers.settings.federation_enabled", return_value=True):
         kind, row = get_migration_file_status(payload)
@@ -1435,15 +1435,15 @@ def test_connected_import_writes_only_that_installs_stubs(real_db):
             public_key="pem-other",
             status="active",
             trust_status="trusted",
-            name="Other Org",
+            name=None,
             created_at=now,
         )
     )
     partner_stub = DbManager.create_record(
-        schemas.Workspace(team_id="TC", workspace_name="Workspace C", instance_id=partner.instance_id)
+        schemas.Workspace(team_id="TC", workspace_name="Workspace B", instance_id=partner.instance_id)
     )
     other_stub = DbManager.create_record(
-        schemas.Workspace(team_id="TD", workspace_name="Workspace D", instance_id=other.instance_id)
+        schemas.Workspace(team_id="TD", workspace_name=None, instance_id=other.instance_id)
     )
     group = DbManager.create_record(
         schemas.WorkspaceGroup(
