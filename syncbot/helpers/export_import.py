@@ -614,6 +614,46 @@ def verify_migration_signature(data: dict) -> bool:
     return federation.verify_body(raw, sig, public_key)
 
 
+def migration_source_name(instance_id: str, row=None) -> str:
+    """Name a signer from this install's ``instances`` row, never from the file."""
+    if row is not None:
+        for attr in ("name", "primary_workspace_name"):
+            value = getattr(row, attr, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    prefix = (instance_id or "").strip()[:8]
+    return f"Connection {prefix}" if prefix else "Connection"
+
+
+def migration_file_status(data: dict) -> tuple[str, object | None]:
+    """Classify a migration file before Import will accept it.
+
+    ``unchecked`` has no signature. ``tampered`` has a signature that does not
+    check. ``this_install`` and ``connected`` may be imported. Anything else
+    is refused. The self row is trusted, so it is checked before a peer.
+    """
+    from helpers.settings import federation_enabled
+    from helpers.workspace_kind import is_self_instance, peer_is_trusted
+
+    source = data.get("source_instance") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or not data.get("signature") or not isinstance(source, dict):
+        return "unchecked", None
+    if not verify_migration_signature(data):
+        return "tampered", None
+    instance_id = str(source.get("instance_id") or "").strip()
+    row = DbManager.get_record(schemas.Instance, id=instance_id) if instance_id else None
+    if row is None:
+        return "unknown", None
+    if is_self_instance(row):
+        return "this_install", row
+    active_peer = peer_is_trusted(row) and getattr(row, "status", None) == "active"
+    if active_peer and not federation_enabled():
+        return "federation_off", row
+    if active_peer:
+        return "connected", row
+    return "not_connected", row
+
+
 def _workspace_id_for_imported_team(
     team_id: str | None,
     *,

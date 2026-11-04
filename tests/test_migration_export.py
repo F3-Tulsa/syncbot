@@ -619,7 +619,7 @@ def test_export_signature_names_this_install(real_db):
     assert verify_migration_signature({"version": 1, "groups": []}) is False
 
 
-def test_review_skips_the_integrity_warning_without_a_source_instance():
+def test_review_refuses_a_file_with_no_signature():
     from handlers.export_import import handle_data_migration_submit_ack
 
     payload = {"version": 1, "workspace": {"team_id": "T1"}, "groups": []}
@@ -644,11 +644,13 @@ def test_review_skips_the_integrity_warning_without_a_source_instance():
         patch("handlers.export_import._download_uploaded_file", return_value=(json.dumps(payload), None)),
         patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
         patch("handlers.export_import.DbManager.find_records", return_value=[]),
-        patch("handlers.export_import.helpers.federation_enabled", return_value=True),
-        patch("helpers._cache._cache_set"),
+        patch("helpers._cache._cache_set") as cache_set,
     ):
         resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
-    assert "Integrity check failed" not in str(resp["view"])
+    assert resp["response_action"] == "errors"
+    assert "can't check this file" in resp["errors"]["data_migration_json_input"]
+    assert "1.7.3" in resp["errors"]["data_migration_json_input"]
+    cache_set.assert_not_called()
 
 
 def test_export_omits_a_disbanded_group_and_a_group_this_workspace_left(real_db):
@@ -1071,3 +1073,230 @@ def test_confirm_import_does_not_add_a_status_line():
     assert "Deleted Status" not in text
     assert "Disbanded" not in text
     assert "\nStatus:" not in text
+
+
+def _upload_body(payload):
+    return {
+        "user": {"id": "U1"},
+        "team": {"id": "TA"},
+        "view": {
+            "state": {
+                "values": {
+                    "data_migration_json_input": {
+                        "data_migration_json_input": {
+                            "files": [{"url_private_download": "https://files.slack.com/m.json"}],
+                        }
+                    }
+                }
+            }
+        },
+    }, json.dumps(payload)
+
+
+def _peer_signed_file(*, name="Nope", groups=None):
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    from federation.core import public_key_fingerprint
+    from helpers.export_import import canonical_json_dumps
+
+    private = Ed25519PrivateKey.generate()
+    public_pem = private.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+    instance_id = public_key_fingerprint(public_pem)
+    payload = {
+        "version": 1,
+        "workspace": {"team_id": "TA", "workspace_name": "Workspace A"},
+        "groups": groups if groups is not None else [{"uid": "g1", "name": "Live Group"}],
+        "syncs": [],
+        "sync_channels": [],
+        "source_instance": {"instance_id": instance_id, "public_key": public_pem, "name": name},
+        "signed_at": "2026-01-01T00:00:00Z",
+    }
+    raw = canonical_json_dumps({key: value for key, value in payload.items() if key != "signature"}).decode()
+    payload["signature"] = base64.b64encode(private.sign(raw.encode())).decode()
+    return payload, instance_id, public_pem
+
+
+def _save_peer(
+    instance_id, public_pem, *, name="Partner Org", primary_workspace_name=None, status="active", trust="trusted"
+):
+    from datetime import UTC, datetime
+
+    from db import DbManager, schemas
+
+    return DbManager.create_record(
+        schemas.Instance(
+            instance_id=instance_id,
+            public_key=public_pem,
+            private_key_encrypted=None,
+            status=status,
+            trust_status=trust,
+            name=name,
+            primary_workspace_name=primary_workspace_name,
+            created_at=datetime.now(UTC).replace(tzinfo=None),
+        )
+    )
+
+
+def test_import_of_this_install_opens_the_review(real_db):
+    from handlers.export_import import handle_data_migration_submit_ack
+    from helpers.export_import import build_migration_export, migration_file_status
+
+    local = _export_rows()
+    payload = build_migration_export(local.id)
+    assert migration_file_status(payload)[0] == "this_install"
+    body, text = _upload_body(payload)
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(text, None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=local),
+    ):
+        resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+    assert resp["response_action"] == "update"
+    assert resp["view"]["title"]["text"] == "Confirm Import"
+
+
+def test_import_refuses_a_changed_file(real_db):
+    import copy
+
+    from handlers.export_import import handle_data_migration_submit_ack
+    from helpers.export_import import build_migration_export
+
+    local = _export_rows()
+    payload = build_migration_export(local.id)
+    changed = copy.deepcopy(payload)
+    changed["groups"][0]["name"] = "Renamed"
+    body, text = _upload_body(changed)
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(text, None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=local),
+        patch("helpers._cache._cache_set") as cache_set,
+    ):
+        resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+    assert resp["response_action"] == "errors"
+    assert "was changed after it was exported" in resp["errors"]["data_migration_json_input"]
+    cache_set.assert_not_called()
+
+
+def test_import_names_an_unknown_signer_by_id_prefix(real_db):
+    from handlers.export_import import handle_data_migration_submit_ack
+    from helpers.export_import import migration_file_status
+
+    payload, instance_id, _public = _peer_signed_file(name="Workspace A")
+    assert migration_file_status(payload)[0] == "unknown"
+    local = _export_rows()
+    body, text = _upload_body(payload)
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(text, None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=local),
+    ):
+        resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+    message = resp["errors"]["data_migration_json_input"]
+    assert f"`Connection {instance_id[:8]}`" in message
+    assert "Workspace A" not in message
+
+
+def test_connected_file_is_named_from_the_saved_connection(real_db):
+    from helpers.export_import import migration_file_status, migration_source_name
+
+    payload, instance_id, public_pem = _peer_signed_file(name="Nope")
+    peer = _save_peer(instance_id, public_pem, name="Partner Org")
+    with patch("helpers.settings.federation_enabled", return_value=True):
+        kind, row = migration_file_status(payload)
+    assert kind == "connected"
+    assert row.instance_id == peer.instance_id
+    assert migration_source_name(instance_id, row) == "Partner Org"
+
+    from db import DbManager, schemas
+
+    DbManager.update_records(
+        schemas.Instance,
+        [schemas.Instance.instance_id == instance_id],
+        {schemas.Instance.name: None, schemas.Instance.primary_workspace_name: "Workspace A"},
+    )
+    blank = DbManager.get_record(schemas.Instance, id=instance_id)
+    assert migration_source_name(instance_id, blank) == "Workspace A"
+
+
+def test_import_refuses_a_peer_that_is_not_an_active_connection(real_db):
+    from handlers.export_import import handle_data_migration_submit_ack
+
+    payload, instance_id, public_pem = _peer_signed_file()
+    peer = _save_peer(instance_id, public_pem, name="Partner Org", trust="untrusted")
+    local = _export_rows()
+    body, text = _upload_body(payload)
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(text, None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=local),
+        patch("helpers.settings.federation_enabled", return_value=True),
+    ):
+        refused = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+    assert "not active" in refused["errors"]["data_migration_json_input"]
+    assert "`Partner Org`" in refused["errors"]["data_migration_json_input"]
+
+    from db import DbManager, schemas
+
+    DbManager.update_records(
+        schemas.Instance,
+        [schemas.Instance.instance_id == peer.instance_id],
+        {schemas.Instance.trust_status: "trusted", schemas.Instance.status: "inactive"},
+    )
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(text, None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=local),
+        patch("helpers.settings.federation_enabled", return_value=True),
+    ):
+        inactive = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+    assert "not active" in inactive["errors"]["data_migration_json_input"]
+
+    DbManager.update_records(
+        schemas.Instance,
+        [schemas.Instance.instance_id == peer.instance_id],
+        {schemas.Instance.status: "active"},
+    )
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("handlers.export_import._download_uploaded_file", return_value=(text, None)),
+        patch("handlers.export_import.helpers.get_workspace_record", return_value=local),
+        patch("helpers.settings.federation_enabled", return_value=False),
+    ):
+        off = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
+    assert "Federation is off" in off["errors"]["data_migration_json_input"]
+    assert "`Partner Org`" in off["errors"]["data_migration_json_input"]
+
+
+def test_finish_imports_nothing_when_the_signer_is_no_longer_trusted(real_db):
+    from handlers.export_import import handle_data_migration_review
+
+    payload, instance_id, public_pem = _peer_signed_file()
+    _save_peer(instance_id, public_pem, name="Partner Org", trust="untrusted")
+    local = _export_rows()
+    body = {"user": {"id": "U1"}, "view": {"id": "V1", "state": {"values": {}}}}
+    meta = {
+        "data": payload,
+        "group_id": 0,
+        "workspace_id": local.id,
+        "team_id_to_workspace_id": {"TA": local.id},
+        "source_name": "Partner Org",
+        "source_kind": "connected",
+        "source_instance_id": instance_id,
+    }
+    with (
+        patch("handlers.export_import._is_admin", return_value=True),
+        patch("helpers._cache._cache_get", return_value=meta),
+        patch("handlers.export_import.helpers.get_workspace_by_id", return_value=local),
+        patch("helpers.settings.federation_enabled", return_value=True),
+        patch("handlers.export_import._run_migration_import") as run_import,
+        patch("handlers.export_import.helpers.notify_user_dm") as dm,
+        patch("handlers._common._close_modal_done"),
+    ):
+        handle_data_migration_review(body, MagicMock(), MagicMock(), {})
+    run_import.assert_not_called()
+    assert "no longer connected" in dm.call_args.args[2]
+    assert "`Partner Org`" in dm.call_args.args[2]

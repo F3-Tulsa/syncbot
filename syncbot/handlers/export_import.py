@@ -961,8 +961,16 @@ def handle_data_migration_submit_ack(
     if data is None or group_id is None or team_id_to_workspace_id is None or workspace_record is None:
         return None
 
-    source = data.get("source_instance")
-    sig_ok = ei.verify_migration_signature(data)
+    kind, signer = ei.migration_file_status(data)
+    if kind not in ("this_install", "connected"):
+        source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else {}
+        name = ei.migration_source_name(str(source.get("instance_id") or ""), signer)
+        return {
+            "response_action": "errors",
+            "errors": {actions.CONFIG_DATA_MIGRATION_JSON_INPUT: _migration_refused_text(kind, name)},
+        }
+    source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else {}
+    instance_id = str(source.get("instance_id") or "")
     from helpers._cache import _cache_set
 
     _cache_set(
@@ -972,19 +980,15 @@ def handle_data_migration_submit_ack(
             "group_id": group_id,
             "workspace_id": workspace_record.id,
             "team_id_to_workspace_id": team_id_to_workspace_id,
+            "source_instance_id": instance_id,
+            "source_name": ei.migration_source_name(instance_id, signer),
+            "source_kind": kind,
         },
         ttl=600,
     )
     from slack.blocks import section
 
     blocks = []
-    if not sig_ok and source:
-        blocks.append(
-            section(
-                ":warning: *Integrity check failed.* The file may have been modified. "
-                "Only Import if you intentionally edited it."
-            )
-        )
     missing = _migration_workspace_names_not_here(data, workspace_record.team_id)
     if missing:
         blocks.append(section(_import_missing_workspace_text(missing, finished=False)))
@@ -1008,6 +1012,53 @@ def handle_data_migration_submit_ack(
 
 _IMPORT_FAIL_TEXT = ":warning: Import failed. Try the import again."
 _IMPORT_EXPIRED_TEXT = ":warning: That import expired. Try the import again."
+
+
+def _migration_refused_text(kind: str, name: str) -> str:
+    if kind == "tampered":
+        return (
+            "This file was changed after it was exported. SyncBot won't import it. "
+            "Export it again from the install that made it."
+        )
+    if kind == "unchecked":
+        return (
+            "SyncBot can't check this file. Export it again from this install or from a connected install. "
+            "A file from before 1.7.3 needs a new export."
+        )
+    if kind == "federation_off":
+        return (
+            f"This file is from `{name}`, and Federation is off. "
+            "A primary Workspace admin can turn it on in Settings."
+        )
+    if kind == "not_connected":
+        return (
+            f"This file is from `{name}`, and that connection is not active. "
+            "A primary Workspace admin can set up the External Connection again, then import this file again."
+        )
+    return (
+        f"SyncBot doesn't know the install that signed this file (`{name}`). "
+        "If it came from a SyncBot install you trust, a primary Workspace admin can connect the two installs "
+        "under External Connections, then import it again."
+    )
+
+
+def _migration_stopped_text(kind: str, name: str) -> str:
+    if kind == "tampered":
+        return ":warning: Import stopped. This file was changed after it was exported. SyncBot won't import it."
+    if kind == "unchecked":
+        return (
+            ":warning: Import stopped. SyncBot can't check this file. "
+            "Export it again from this install or from a connected install."
+        )
+    if kind == "federation_off":
+        return (
+            ":warning: Import stopped. Federation is off. "
+            "A primary Workspace admin can turn it on in Settings, then import this file again."
+        )
+    return (
+        f":warning: Import stopped. `{name}` is no longer connected here. "
+        "Connect it again under External Connections, then import the file again."
+    )
 
 
 def handle_data_migration_review_ack(body: dict, client: WebClient, context: dict) -> dict | None:
@@ -1057,6 +1108,16 @@ def _complete_data_migration_import(
     workspace_record = helpers.get_workspace_by_id(workspace_id)
     if not workspace_record:
         _notify_import_result(client, body, user_id, _IMPORT_FAIL_TEXT)
+        return
+    kind, signer = ei.migration_file_status(data)
+    if kind not in ("this_install", "connected"):
+        source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else {}
+        instance_id = str(source.get("instance_id") or "")
+        if signer is not None:
+            name = ei.migration_source_name(instance_id, signer)
+        else:
+            name = meta.get("source_name") or ei.migration_source_name(instance_id, None)
+        _notify_import_result(client, body, user_id, _migration_stopped_text(kind, name))
         return
     try:
         _run_migration_import(

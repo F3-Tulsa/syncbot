@@ -189,6 +189,14 @@ class TestDataMigrationModal:
 
 
 class TestDataMigrationImportConnect:
+    @pytest.fixture(autouse=True)
+    def _signed_by_this_install(self):
+        with patch(
+            "handlers.export_import.ei.migration_file_status",
+            return_value=("this_install", None),
+        ):
+            yield
+
     def test_prepare_does_not_pair(self):
         from types import SimpleNamespace
 
