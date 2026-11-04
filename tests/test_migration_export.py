@@ -917,6 +917,47 @@ def test_import_skips_a_mapping_onto_another_local_workspace(real_db):
     )
 
 
+def test_import_skips_a_mapping_without_both_team_ids(real_db):
+    from db import DbManager, schemas
+    from helpers.export_import import import_migration_data
+
+    workspace_a, _workspace_b, _group, _sync = _two_local_workspaces()
+    import_migration_data(
+        {
+            "workspace": {"team_id": "TA"},
+            "groups": [{"uid": "a-group", "name": "A Group", "role": "member"}],
+            "syncs": [],
+            "sync_channels": [],
+            "user_mappings": [
+                {
+                    "source_team_id": None,
+                    "target_team_id": "TA",
+                    "source_user_id": "U-GONE",
+                    "target_user_id": "UA",
+                    "map_method": "manual",
+                    "group_uid": "a-group",
+                },
+                {
+                    "source_team_id": "TA",
+                    "target_team_id": "",
+                    "source_user_id": "UA",
+                    "target_user_id": "U-GONE",
+                    "map_method": "manual",
+                    "group_uid": "a-group",
+                },
+            ],
+        },
+        workspace_a.id,
+        team_id_to_workspace_id={"TA": workspace_a.id},
+    )
+    assert (
+        DbManager.find_records(schemas.UserMapping, [schemas.UserMapping.source_workspace_id == workspace_a.id]) == []
+    )
+    assert (
+        DbManager.find_records(schemas.UserMapping, [schemas.UserMapping.target_workspace_id == workspace_a.id]) == []
+    )
+
+
 def test_import_writes_a_stub_already_in_the_group(real_db):
     from db import DbManager, schemas
     from federation.core import get_instance_id

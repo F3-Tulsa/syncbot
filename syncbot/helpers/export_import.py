@@ -917,13 +917,17 @@ def import_migration_data(
         mapped_group_uid = str(um.get("group_uid") or "").strip()
         if mapped_group_uid and mapped_group_uid not in group_uid_to_id:
             continue
+        src_team = str(um.get("source_team_id") or "").strip()
+        tgt_team = str(um.get("target_team_id") or "").strip()
+        if not src_team or not tgt_team:
+            continue
         src_ws_id = _workspace_id_for_imported_team(
-            str(um.get("source_team_id") or "") or None,
+            src_team,
             this_workspace_id=workspace_id,
             team_id_to_workspace_id=team_id_to_workspace_id,
         )
         tgt_ws_id = _workspace_id_for_imported_team(
-            str(um.get("target_team_id") or "") or None,
+            tgt_team,
             this_workspace_id=workspace_id,
             team_id_to_workspace_id=team_id_to_workspace_id,
         )
