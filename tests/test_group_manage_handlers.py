@@ -8,6 +8,8 @@ import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 os.environ.setdefault("DATABASE_HOST", "localhost")
 os.environ.setdefault("DATABASE_USER", "root")
 os.environ.setdefault("DATABASE_PASSWORD", "test")
@@ -364,7 +366,8 @@ class TestGroupManagerNotices:
         assert group_dms.call_args.kwargs["exclude_workspace_id"] == ACTING_WS_ID
         assert group_dms.call_args.args[1] == notice
 
-    def test_remove_skips_the_workspace_that_already_gets_channel_detail(self):
+    @patch("handlers.group.replace_group_invite_code")
+    def test_remove_skips_the_workspace_that_already_gets_channel_detail(self, rotate):
         actor = SimpleNamespace(id=ACTING_WS_ID, team_id="T1", workspace_name="Workspace A", deleted_at=None)
         target = SimpleNamespace(id=OTHER_WS_ID, team_id="T2", workspace_name="Workspace B", deleted_at=None)
         member = SimpleNamespace(
@@ -435,3 +438,101 @@ class TestGroupManagerNotices:
         assert group_dms.call_args.kwargs["exclude_workspace_id"] == OTHER_WS_ID
         assert group_dms.call_args.args[1] == notice
         extra_dm.assert_not_called()
+        rotate.assert_called_once_with(GROUP_ID)
+
+
+@pytest.fixture
+def real_db(tmp_path):
+    import db as db_mod
+    from db import initialize_database
+    from helpers._cache import clear_all_caches
+
+    url = f"sqlite:///{tmp_path / 'group_manage.db'}"
+    old_engine = db_mod.GLOBAL_ENGINE
+    old_session = db_mod.GLOBAL_SESSION
+    old_schema = db_mod.GLOBAL_SCHEMA
+    with patch.dict(os.environ, {"DATABASE_BACKEND": "sqlite", "DATABASE_URL": url}, clear=False):
+        try:
+            db_mod.GLOBAL_ENGINE = None
+            db_mod.GLOBAL_SESSION = None
+            db_mod.GLOBAL_SCHEMA = None
+            initialize_database()
+            from federation import core as federation_core
+
+            federation_core._INSTANCE_ID = None
+            federation_core._cached_private_key = None
+            federation_core._cached_public_pem = None
+            federation_core.get_or_create_instance_keypair()
+            clear_all_caches()
+            yield
+        finally:
+            if db_mod.GLOBAL_ENGINE is not None:
+                db_mod.GLOBAL_ENGINE.dispose()
+            db_mod.GLOBAL_ENGINE = old_engine
+            db_mod.GLOBAL_SESSION = old_session
+            db_mod.GLOBAL_SCHEMA = old_schema
+            clear_all_caches()
+
+
+def test_remove_gives_the_group_a_new_invite_code(real_db):
+    import json
+    from datetime import UTC, datetime
+
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    instance_id = get_instance_id()
+    actor = DbManager.create_record(
+        schemas.Workspace(team_id="TA", workspace_name="Workspace A", instance_id=instance_id)
+    )
+    target = DbManager.create_record(
+        schemas.Workspace(team_id="TB", workspace_name="Workspace B", instance_id=instance_id)
+    )
+    group = DbManager.create_record(
+        schemas.WorkspaceGroup(
+            name="B Group",
+            invite_code="OLD-CODE",
+            status="active",
+            created_at=now,
+            uid="b-group",
+        )
+    )
+    DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=actor.id,
+            status="active",
+            role="owner",
+            joined_at=now,
+        )
+    )
+    member = DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=target.id,
+            status="active",
+            role="member",
+            joined_at=now,
+        )
+    )
+    body = {
+        "user": {"id": "U1"},
+        "team": {"id": "TA"},
+        "view": {"private_metadata": json.dumps({"member_id": member.id}), "team_id": "TA"},
+    }
+    with (
+        patch("handlers.group_manage.helpers.is_workspace_manager", return_value=True),
+        patch("handlers.group_manage.helpers.get_workspace_record", return_value=actor),
+        patch("handlers.group_manage.helpers.is_workspace_owner", return_value=True),
+        patch("handlers.group_manage.helpers.format_admin_label", return_value="Ada Lovelace"),
+        patch("handlers.group_manage.helpers.resolve_workspace_name", side_effect=lambda ws: ws.workspace_name),
+        patch("helpers.notifications.notify_group_managers", return_value=[]),
+        patch("federation.replicate.replicate_group_member_remove"),
+        patch("handlers.group_manage.builders.refresh_home_tab_for_workspace"),
+        patch("handlers._common._close_modal_done"),
+    ):
+        handle_remove_group_member_confirm(body, MagicMock(), MagicMock(), {})
+    refreshed = DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.id == group.id])[0]
+    assert refreshed.invite_code != "OLD-CODE"
+    assert DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.invite_code == "OLD-CODE"]) == []

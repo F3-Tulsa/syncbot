@@ -969,6 +969,8 @@ def test_group_leave_and_remove_notify_local_managers(real_db):
     assert status == 200
     dm.assert_called_once()
     assert dm.call_args.args[1] == ":wave: `Stub` left `Shared`."
+    left = DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.id == peer["group"].id])[0]
+    assert left.invite_code == "GRP-TEST01"
 
     with (
         patch("helpers.notifications.get_bot_token", return_value="xoxb-test"),
@@ -992,6 +994,16 @@ def test_group_leave_and_remove_notify_local_managers(real_db):
                 schemas.WorkspaceGroupMember.group_id == peer["group"].id,
                 schemas.WorkspaceGroupMember.workspace_id == peer["stub"].id,
             ],
+        )
+        == []
+    )
+    removed = DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.id == peer["group"].id])[0]
+    assert removed.invite_code != "GRP-TEST01"
+    assert removed.invite_code.startswith("FED-")
+    assert (
+        DbManager.find_records(
+            schemas.WorkspaceGroup,
+            [schemas.WorkspaceGroup.invite_code == "GRP-TEST01"],
         )
         == []
     )

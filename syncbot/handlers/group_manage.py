@@ -1140,6 +1140,9 @@ def handle_remove_group_member_confirm(
         schemas.WorkspaceGroupMember,
         [schemas.WorkspaceGroupMember.id == member.id],
     )
+    from handlers.group import replace_group_invite_code
+
+    replace_group_invite_code(group.id)
     try:
         from federation.replicate import replicate_group_member_remove
 
