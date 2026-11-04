@@ -719,6 +719,35 @@ class TestFedWsCacheInvalidation:
         assert status == 404
         assert resp == {"message": "Not Found"}
 
+    def test_used_code_from_an_untrusted_peer_stays_unknown(self):
+        from federation import api as federation_api
+
+        body = {
+            "code": "FED-ABCD1234",
+            "webhook_url": "https://peer.example/api/federation",
+            "instance_id": "a" * 64,
+            "public_key": "pem",
+        }
+        saved = SimpleNamespace(
+            instance_id=body["instance_id"],
+            public_key="pem",
+            status="active",
+            trust_status="untrusted",
+        )
+        with (
+            patch.object(federation_api.federation, "federation_verify", return_value=True),
+            patch.object(federation_api.federation, "instance_id_matches_public_key", return_value=True),
+            patch.object(federation_api.federation, "get_instance_id", return_value="b" * 64),
+            patch.object(federation_api.federation, "get_or_create_instance") as create,
+            patch.object(federation_api.DbManager, "find_records", side_effect=[[], [saved]]),
+            patch.object(federation_api.DbManager, "update_records") as update,
+        ):
+            status, resp = self._pair_request(body)
+        assert status == 404
+        assert resp == {"message": "Not Found"}
+        create.assert_not_called()
+        update.assert_not_called()
+
     def test_inbound_pair_rejects_connection_blob_as_code(self):
         from federation import api as federation_api
 

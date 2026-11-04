@@ -867,8 +867,8 @@ def _pair_success_body(*, url_updated: bool = False) -> dict:
     return body
 
 
-def _active_peer_with_key(instance_id: str, public_key: str):
-    """Active peer row saved with this exact public key, if one exists."""
+def _get_accepted_peer(instance_id: str, public_key: str):
+    """Accepted peer row saved with this exact public key, if one exists."""
     rows = DbManager.find_records(
         schemas.Instance,
         [
@@ -879,6 +879,8 @@ def _active_peer_with_key(instance_id: str, public_key: str):
     if not rows:
         return None
     row = rows[0]
+    if not _peer_accepted(row):
+        return None
     if (getattr(row, "public_key", None) or "").strip() != (public_key or "").strip():
         return None
     return row
@@ -925,7 +927,7 @@ def handle_pair(body: dict, body_str: str, headers: dict) -> tuple[int, dict]:
         [schemas.FederationPairingCode.code == code],
     )
     if not pairing_rows:
-        if _active_peer_with_key(remote_instance_id, remote_public_key) is not None:
+        if _get_accepted_peer(remote_instance_id, remote_public_key) is not None:
             log_info(
                 "federation_pair",
                 direction="inbound",
