@@ -909,7 +909,7 @@ def test_import_keeps_an_existing_sync_in_its_group(real_db):
     from db import DbManager, schemas
     from helpers.export_import import import_migration_data
 
-    workspace_a, _workspace_b, group, _sync = _two_local_workspaces()
+    workspace_a, workspace_b, group, _sync = _two_local_workspaces()
     import_migration_data(
         {
             "workspace": {"team_id": "TA"},
@@ -923,8 +923,8 @@ def test_import_keeps_an_existing_sync_in_its_group(real_db):
     kept = DbManager.find_records(schemas.Sync, [schemas.Sync.uid == "b-sync"])[0]
     assert kept.group_id == group.id
     assert kept.title == "B Sync"
-    a_sync_channels = DbManager.find_records(schemas.Sync, [schemas.Sync.uid == "a-group"])
-    assert a_sync_channels == []
+    rows = DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.channel_id == "CGEN"])
+    assert [(row.sync_id, row.workspace_id) for row in rows] == [(kept.id, workspace_b.id)]
 
 
 def test_import_skips_a_mapping_onto_another_local_workspace(real_db):
