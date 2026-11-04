@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- NOTICE: Database migration in this release; stored Sync status values are rewritten
+- REQUIRED: Slack manifest needs to be updated; leave and delete events are added, `usergroups:read` is dropped, and reinstall if the bot lacks `emoji:read`
 - Pause removes SyncBot from the Channel, removing SyncBot pauses the same way, and a manager adding it back resumes
 - Leave Sync, Leave Group, and Remove keep history for the retention period, and Join or Create within it brings it back
 - Disband keeps history for the retention period unless its checkbox deletes it now
@@ -46,7 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Every Sync change posts one notice in each active Channel of the Sync, and the acting Workspace's managers get the details
 - A workspace still installed here posts Install when another instance lists it, and that notice names the app that was installed
 - A migration export leaves out a disbanded group, and an older file does not revive it
-- The Slack app manifest adds Channel leave and delete events and drops usergroups:read
 
 ### Fixed
 
@@ -75,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- NOTICE: Database migration in this release; federation tables are replaced, leftover columns are dropped, and existing connections are kept
 - Leave Connection pauses remote Workspaces, reconnecting restores them and shows `#channel` names
 - MySQL and PostgreSQL prefer `DATABASE_SCHEMA` with `syncbot_${stage}` fallback
 - Federation returns 400 or 401 before reading an untrusted body
@@ -143,6 +145,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- REQUIRED: Slack manifest needs to be updated; adds `emoji:read` and `usergroups:read`, drops user `im:write`, then reinstall in each Workspace
 - Authorize SyncBot no longer asks to send DMs as you
 - New publishes are visible to the whole group; a Channel may be published in more than one group
 - Reaction send and receive follow publish and subscribe; Reaction type is Hybrid, Direct, or Off
@@ -166,8 +169,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- REQUIRED: Environment change in this release; set `DATA_ENCRYPTION_KEY` on the running process, and deploy scripts copy `TOKEN_ENCRYPTION_KEY`
 - User Mapping leftover match names are gone (`matched_at` is `mapped_at`; old backup keys still import)
-- `TOKEN_ENCRYPTION_KEY` still loads when `DATA_ENCRYPTION_KEY` is unset and logs a deprecation warning
 
 ## [1.5.2] - 2026-09-03
 
@@ -186,6 +189,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- NOTICE: Environment change in this release; `SYNCBOT_INSTANCE_ID` is ignored and the instance id is the key fingerprint
 - User Mapping uses map wording, a 20-row page, and `last_auto_map`
 - Federation instance id is a SHA-256 fingerprint of the Ed25519 public key; connection codes carry the peer's full endpoint URL
 - Sync hot paths reuse per-request and 60s process caches
@@ -197,7 +201,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On-the-fly mapping uses dest directory email then one `lookupByEmail` and persists a none stub
 - Federation connection codes, image blocks, Lambda Function URLs, and mention rewrite work across instances
 - AWS migrate reports FunctionError, Lambda timeout is 120s, and MySQL column CHANGE includes the existing type
-- Leftover `SYNCBOT_INSTANCE_ID` is ignored
 
 ## [1.5.0] - 2026-09-02
 
@@ -219,6 +222,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ## [1.4.1] - 2026-09-01
+
+### Changed
+
+- NOTICE: Database migration in this release; token columns are encrypted in place with the current `DATA_ENCRYPTION_KEY`
+- REQUIRED: Environment change in this release; turn Federation on in Settings if it was only set with `SYNCBOT_FEDERATION_ENABLED`
 
 ### Fixed
 
@@ -243,7 +251,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Settings is available on every workspace for Slack admins; instance fields stay primary-only
-- Leftover `SYNCBOT_FEDERATION_ENABLED`, `REQUIRE_ADMIN`, and `ALLOW_PRIVATE_CHANNELS` env is ignored; one-time seed copies federation and private-channel policy
+- NOTICE: Environment change in this release; `SYNCBOT_FEDERATION_ENABLED`, `REQUIRE_ADMIN`, and `ALLOW_PRIVATE_CHANNELS` are seeded once, then ignored
 
 ### Fixed
 
@@ -271,8 +279,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- NOTICE: Environment change in this release; `SYNCBOT_PUBLIC_URL` is ignored and the request Host is used
 - `REQUIRE_ADMIN` still limits configuration; every user can open Home, authorize, and Refresh
-- `SYNCBOT_PUBLIC_URL` is ignored; Authorize and federation use the request Host
 
 ### Fixed
 
@@ -310,7 +318,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `SOFT_DELETE_RETENTION_DAYS`, `ALLOW_PRIVATE_CHANNELS`, and `BROADCAST_ALLOWED_WORKSPACES` are seed values; Settings wins once saved
+- NOTICE: Database migration in this release; group role `creator` is rewritten to `owner` and `created_by_workspace_id` is dropped
+- NOTICE: Environment change in this release; retention, private channels, and the broadcast list are seeds, then Settings wins
 - Retention changes apply without a restart
 - Ownership survives uninstall until the workspace's data is deleted
 - Destructive confirmations use a red button
@@ -344,7 +353,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Cloud deploy uses `DATABASE_BACKEND` and `CLOUD_PROVIDER`; leftover alias names warn until 2.0.0
+- NOTICE: Environment change in this release; set `DATABASE_BACKEND` and `CLOUD_PROVIDER`, leftover names warn until 2.0.0
 - GitHub Actions picks provider and stage from the job; the first AWS deploy creates the bootstrap stack
 - First-time deploy docs and `.env.deploy.example` match the AWS and GCP paths
 
@@ -353,6 +362,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `./deploy.sh` no longer looks up leftover Secrets Manager IDs
 
 ## [1.2.1] - 2026-08-27
+
+### Changed
+
+- NOTICE: Deploy aborts while the stack still has RDS; back up, follow the removal steps, and do not retry that update
 
 ### Fixed
 
@@ -384,9 +397,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- REQUIRED: Slack manifest needs to be updated; request, interactivity, and redirect URLs
+- REQUIRED: Environment change in this release; set `DATA_ENCRYPTION_KEY` on the running process, and deploy scripts copy `TOKEN_ENCRYPTION_KEY`
+- REQUIRED: Environment change in this release; `DATABASE_USER` is a GitHub variable, not a secret
 - AWS uses Lambda Function URLs (no API Gateway or Secrets Manager); GCP secrets are Terraform variables
-- `TOKEN_ENCRYPTION_KEY` renamed to `DATA_ENCRYPTION_KEY` (legacy fallback kept)
-- Deploy env uses `DATABASE_*`; `DATABASE_USER` is a GitHub variable, not a secret
 
 ### Fixed
 
@@ -402,19 +416,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Synced message author shows the local display name and avatar for mapped users
 - Default DB usernames shortened to `sbadmin_{stage}` and `sbapp_{stage}`; existing RDS master names stay
-- AWS Lambda migrations run once post-deploy (not on cold start); memory is 256 MB; re-run bootstrap for `lambda:InvokeFunction`
+- REQUIRED: Re-run bootstrap for `lambda:InvokeFunction`; migrations run after deploy and memory is 256 MB
 
 ## [1.0.1] - 2026-03-26
 
 ### Changed
 
+- REQUIRED: Environment change in this release; set `PRIMARY_WORKSPACE` to the Team ID, and `ENABLE_DB_RESET` is now `true`, `1`, or `yes`
 - Cross-workspace `#channel` links resolve to native local channels when the channel is part of the same sync; otherwise use workspace archive URLs with a code-formatted fallback
 - `@mentions` and `#channel` links in federated messages are now resolved on the receiving instance (native tags when mapped/synced, fallbacks otherwise)
-- `ENABLE_DB_RESET` is now a boolean (`true` / `1` / `yes`) instead of a Slack Team ID; requires `PRIMARY_WORKSPACE` to match
-
-### Added
-
-- `PRIMARY_WORKSPACE` env var: must be set to a Slack Team ID for backup/restore to appear. Also scopes DB reset to that workspace.
 
 ## [1.0.0] - 2026-03-25
 

@@ -43,7 +43,7 @@ On PRs, GitHub Actions runs the same test command (see `.github/workflows/ci.yml
 ## Hard rules (guardrails)
 
 1. **Provider-neutral `syncbot/`** — do not add `boto3`, `google.cloud`, or other cloud SDK imports under `syncbot/`. Use `infra/<provider>/` and workflows for provider code. This is also enforced in CI (`forbidden-imports` job).
-2. **Version & changelog** — do not bump `pyproject.toml`’s `version` or `syncbot/constants.py` `__version__`, or add a `## [X.Y.Z]` heading in a feature PR. Releases on `main` are automated with **python-semantic-release**. Put Keep a Changelog notes (**Added** / **Changed** / **Fixed**, **[1.2.0](CHANGELOG.md)** length) under `## [Unreleased]` below `<!-- version list -->`; the release job retitles that heading to the version and date and copies that section onto the GitHub Release. If Unreleased is missing, PSR drafts from `feat` / `fix` / `perf` subjects. Polishing an already-released heading is OK. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
+2. **Version & changelog** — do not bump `pyproject.toml`’s `version` or `syncbot/constants.py` `__version__`, or add a `## [X.Y.Z]` heading in a feature PR. Releases on `main` are automated with **python-semantic-release**. Put Keep a Changelog notes (**Added** / **Changed** / **Fixed**, **[1.2.0](CHANGELOG.md)** length) under `## [Unreleased]` below `<!-- version list -->`; the release job retitles that heading to the version and date and copies that section onto the GitHub Release. A database change, environment change, or operator step is a **NOTICE** or **REQUIRED** bullet at the top of **Changed**, as described under **Docs voice**. If Unreleased is missing, PSR drafts from `feat` / `fix` / `perf` subjects. Polishing an already-released heading is OK. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 3. **Requirements files** — do not edit `syncbot/requirements.txt` by hand. Change dependencies in `pyproject.toml` and run the pre-commit `sync-requirements` hook or `poetry export` as in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 4. **Secrets** — never commit real `.env`, `.env.deploy.*` (only `*.example` templates), private keys, or large artifacts. Do not commit `.aws-sam/build` output.
 5. **Deployment branches** — on a **fork**, do not push to `test` or `prod` as a casual step; those branches deploy. Canonical releases run only on **F3Nation-Community/slack-syncbot** `main` (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)). Forks pull `main` and promote to `test`/`prod` themselves. AWS lives under `infra/aws/` and GCP under `infra/gcp/`. `FEDERATION_HTTP_MAX_MB` is injected there (`30` on Cloud Run, `4` on Lambda). Do not copy those numbers into `syncbot/`. `GET /health` and `GET /ready` are long-running only. A Lambda Function URL answers 404 to a stray GET.
@@ -58,6 +58,19 @@ Operator-facing docs (README, `docs/*.md`, `.env*.example`, `infra/gcp/example.t
 Stage is only **`test`** or **`prod`**. Do not use `YOURSTAGE` as if the name were arbitrary. Show the real values (`--env test`, `slack-manifest_test.json`, `syncbot_test`) and mention `prod` as the other choice. Keep `YOUR_*` for values that really vary (region, host, username).
 
 **Changelog / GitHub Release notes** follow Keep a Changelog and **[1.2.0](CHANGELOG.md)** length: one short line per bullet, not the operator-docs paragraph style. Do not write an operator-guide paragraph into the changelog.
+
+When operators should know about a database or environment change, or still have to act, put one short bullet first under `### Changed` in `## [Unreleased]`. Keep the same length. Leave the headings as **Added** / **Changed** / **Fixed**. The release job copies that block onto the GitHub Release. A later edit of a published section does not change the Release page, so update that Release body to the same text when you polish one.
+
+**NOTICE** means they should know before going on. Use it for a database change, and for an environment name that still loads or that the app ignores because it already has the replacement.
+
+- `NOTICE: Database migration in this release;` when an Alembic revision rewrites or drops stored data. Name what changes. Deploy runs a new table or column on its own, so that revision stays a normal bullet.
+- `NOTICE: Environment change in this release;` when an old name still loads, or the app ignores a leftover name and already has the replacement. Name the variable and what happens.
+
+**REQUIRED** means a person has to act. Use it when deploy or a feature fails until they do.
+
+- `REQUIRED: Slack manifest needs to be updated;` when bot scopes, user scopes, bot events, or the Slack request, interactivity, or redirect URLs change. Name the change. Say to reinstall when a new bot scope has to be on the token.
+- `REQUIRED: Environment change in this release;` when a value has to change, or a feature stays off until env or Settings is updated. Name the variable and the action.
+- `REQUIRED:` with a short description for another operator step, such as re-running bootstrap or stopping because the stack still has RDS.
 
 **Example names** — Use generic fixtures, not operator screenshots or community-specific names. Workspaces: `Workspace A`, `Workspace B`. Channels: `#general`, `#announcements`. People: `Ada Lovelace`. Connection labels: `Partner Org` (not a workspace name). A missing workspace name is `Workspace`. URLs: `https://ws-a.example`, `https://peer.example`. Do not copy names from screenshots. Prefer "set up" when you mean the action. In operator docs the database name is `DATABASE_BACKEND`, not a deploy alias.
 
