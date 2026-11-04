@@ -1749,33 +1749,9 @@ def handle_group_member_remove(body: dict, fed_ws: schemas.Instance) -> tuple[in
             schemas.WorkspaceGroupMember.workspace_id == ws.id,
         ],
     )
-    _replace_federated_invite_code(groups[0].id)
+    helpers.replace_group_invite_code(groups[0].id, lambda: "FED-" + secrets.token_hex(4).upper())
     _invalidate_replicated_group_homes(groups[0].id)
     return 200, {"ok": True}
-
-
-def _replace_federated_invite_code(group_id: int) -> None:
-    """Give a replicated Group a new ``FED-`` invite code. Each install keeps its own."""
-    from sqlalchemy.exc import IntegrityError
-
-    for _ in range(5):
-        code = "FED-" + secrets.token_hex(4).upper()
-        taken = DbManager.find_records(
-            schemas.WorkspaceGroup,
-            [schemas.WorkspaceGroup.invite_code == code],
-        )
-        if taken:
-            continue
-        try:
-            DbManager.update_records(
-                schemas.WorkspaceGroup,
-                [schemas.WorkspaceGroup.id == group_id],
-                {schemas.WorkspaceGroup.invite_code: code},
-            )
-        except IntegrityError:
-            continue
-        return
-    log_warning("group_invite_code_failed", group_id=group_id)
 
 
 def handle_workspace_release(body: dict, fed_ws: schemas.Instance) -> tuple[int, dict]:

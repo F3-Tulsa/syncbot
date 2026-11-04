@@ -226,7 +226,7 @@ class TestDataMigrationImportConnect:
     @pytest.fixture(autouse=True)
     def _signed_by_this_install(self):
         with patch(
-            "handlers.export_import.ei.migration_file_status",
+            "handlers.export_import.ei.get_migration_file_status",
             return_value=("this_install", None),
         ):
             yield
@@ -628,7 +628,7 @@ class TestDataMigrationImportConnect:
             patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
             patch("handlers.export_import.DbManager.find_records", return_value=[]),
             patch(
-                "handlers.export_import.ei.migration_file_status",
+                "handlers.export_import.ei.get_migration_file_status",
                 return_value=("connected", signer),
             ),
             patch("helpers._cache._cache_set"),

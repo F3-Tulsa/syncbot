@@ -25,7 +25,10 @@ Imports submodules only, per the import-direction constraint in
 ``helpers/sync_cleanup.py``.
 """
 
+from collections.abc import Callable
 from datetime import datetime
+
+from sqlalchemy.exc import IntegrityError
 
 from db import DbManager, schemas
 from logger import log_info, log_warning
@@ -379,6 +382,32 @@ def upsert_group_membership(
                     schemas.WorkspaceGroupMember.status: "inactive",
                 },
             )
+
+
+def replace_group_invite_code(group_id: int, new_code: Callable[[], str]) -> None:
+    """Give *group_id* a new invite code from *new_code*. Each instance keeps its own.
+
+    Tries five codes. If every one is already on a Group, the current code
+    stays and ``group_invite_code_failed`` is logged without the code.
+    """
+    for _ in range(5):
+        code = new_code()
+        taken = DbManager.find_records(
+            schemas.WorkspaceGroup,
+            [schemas.WorkspaceGroup.invite_code == code],
+        )
+        if taken:
+            continue
+        try:
+            DbManager.update_records(
+                schemas.WorkspaceGroup,
+                [schemas.WorkspaceGroup.id == group_id],
+                {schemas.WorkspaceGroup.invite_code: code},
+            )
+        except IntegrityError:
+            continue
+        return
+    log_warning("group_invite_code_failed", group_id=group_id)
 
 
 def get_owner_team_ids_blocking_stub_pause(peer_instance_id: str, stub_team_ids) -> list[str]:

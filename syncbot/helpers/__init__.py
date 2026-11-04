@@ -88,6 +88,7 @@ from helpers.group_roles import (
     get_promotable_members,
     get_retained_owners,
     is_workspace_owner,
+    replace_group_invite_code,
     succeed_ownership,
 )
 from helpers.message_blocks import (
@@ -386,6 +387,7 @@ __all__ = [
     "get_promotable_members",
     "get_retained_owners",
     "is_workspace_owner",
+    "replace_group_invite_code",
     "post_message",
     "purge_stale_soft_deletes",
     "purge_sync",

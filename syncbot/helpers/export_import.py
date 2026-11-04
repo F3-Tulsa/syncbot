@@ -614,7 +614,7 @@ def verify_migration_signature(data: dict) -> bool:
     return federation.verify_body(raw, sig, public_key)
 
 
-def migration_source_name(instance_id: str, row=None) -> str:
+def format_migration_source_name(instance_id: str, row=None) -> str:
     """Name a signer by its connection name, never from the file."""
     name = getattr(row, "name", None) if row is not None else None
     if isinstance(name, str) and name.strip():
@@ -623,7 +623,7 @@ def migration_source_name(instance_id: str, row=None) -> str:
     return f"Connection {prefix}" if prefix else "Connection"
 
 
-def migration_file_status(data: dict) -> tuple[str, object | None]:
+def get_migration_file_status(data: dict) -> tuple[str, object | None]:
     """Classify a migration file before Import will accept it.
 
     ``unchecked`` has no signature. ``tampered`` has a signature that does not

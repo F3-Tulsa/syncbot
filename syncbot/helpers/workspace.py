@@ -832,7 +832,7 @@ _HOLD_REFUSED_STATUSES = frozenset({401, 403, 404})
 _HOLD_ANSWER_STATUSES = frozenset({200, 409}) | _HOLD_REFUSED_STATUSES
 
 
-def migration_peer_hold(team_id: str) -> tuple[str, schemas.Instance | None]:
+def get_migration_peer_hold(team_id: str) -> tuple[str, schemas.Instance | None]:
     """``(hold, peer)`` before pending Channels resume.
 
     ``hold`` is ``no_peer``, ``released``, ``still_hosted``, ``refused``, or
@@ -895,7 +895,7 @@ def peer_still_hosts_team(team_id: str) -> bool:
 
     No trusted peer means this instance is the only one, so the team is not held.
     """
-    hold, _peer = migration_peer_hold(team_id)
+    hold, _peer = get_migration_peer_hold(team_id)
     return hold in ("still_hosted", "refused", "unreachable")
 
 
@@ -915,7 +915,7 @@ def consider_migration_release(team_id: str) -> tuple[str, schemas.Instance | No
     workspace = DbManager.get_record(schemas.Workspace, id=team_id)
     if workspace is None or not is_local_workspace(workspace):
         return "resumed", None
-    hold, peer = migration_peer_hold(team_id)
+    hold, peer = get_migration_peer_hold(team_id)
     if hold == "still_hosted":
         return "waiting_for_uninstall", peer
     if hold in ("refused", "unreachable"):

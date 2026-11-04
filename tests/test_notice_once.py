@@ -237,7 +237,7 @@ def test_import_with_no_peer_resumes():
 def test_import_stays_waiting_when_a_peer_still_has_the_team():
     from types import SimpleNamespace
 
-    from helpers.workspace import consider_migration_release, migration_peer_hold, peer_still_hosts_team
+    from helpers.workspace import consider_migration_release, get_migration_peer_hold, peer_still_hosts_team
 
     workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
     quiet = SimpleNamespace(instance_id="a" * 64, private_key_encrypted=None, status="active")
@@ -258,7 +258,7 @@ def test_import_stays_waiting_when_a_peer_still_has_the_team():
         patch("federation.core.push_teams", side_effect=push),
         patch("helpers.workspace.restore_migrated_workspace") as restore,
     ):
-        assert migration_peer_hold("T1") == ("still_hosted", live)
+        assert get_migration_peer_hold("T1") == ("still_hosted", live)
         assert consider_migration_release("T1") == ("waiting_for_uninstall", live)
         restore.assert_not_called()
         assert peer_still_hosts_team("T1") is True
@@ -267,7 +267,7 @@ def test_import_stays_waiting_when_a_peer_still_has_the_team():
 def test_import_resumes_when_every_peer_has_released_the_team():
     from types import SimpleNamespace
 
-    from helpers.workspace import consider_migration_release, migration_peer_hold, peer_still_hosts_team
+    from helpers.workspace import consider_migration_release, get_migration_peer_hold, peer_still_hosts_team
 
     workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
     peer = SimpleNamespace(instance_id="b" * 64, private_key_encrypted=None, status="active")
@@ -281,7 +281,7 @@ def test_import_resumes_when_every_peer_has_released_the_team():
             patch("federation.core.push_teams", return_value={"results": {"T1": answer}}),
             patch("helpers.workspace.restore_migrated_workspace") as restore,
         ):
-            assert migration_peer_hold("T1") == ("released", None)
+            assert get_migration_peer_hold("T1") == ("released", None)
             assert consider_migration_release("T1") == ("resumed", None)
             restore.assert_called_once_with("T1")
             assert peer_still_hosts_team("T1") is False
@@ -311,7 +311,7 @@ def test_import_stays_pending_when_a_peer_cannot_be_reached():
 def test_import_says_which_peer_refused_the_check():
     from types import SimpleNamespace
 
-    from helpers.workspace import consider_migration_release, migration_peer_hold, peer_still_hosts_team
+    from helpers.workspace import consider_migration_release, get_migration_peer_hold, peer_still_hosts_team
 
     workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
     peer = SimpleNamespace(instance_id="e" * 64, private_key_encrypted=None, status="active")
@@ -325,7 +325,7 @@ def test_import_says_which_peer_refused_the_check():
             patch("federation.core.push_teams", return_value={"_http_status": status}) as push,
             patch("helpers.workspace.restore_migrated_workspace") as restore,
         ):
-            assert migration_peer_hold("T1") == ("refused", peer)
+            assert get_migration_peer_hold("T1") == ("refused", peer)
             assert consider_migration_release("T1") == ("refused", peer)
             restore.assert_not_called()
             assert peer_still_hosts_team("T1") is True
@@ -335,7 +335,7 @@ def test_import_says_which_peer_refused_the_check():
 def test_import_names_a_refusal_over_a_peer_it_cannot_reach():
     from types import SimpleNamespace
 
-    from helpers.workspace import migration_peer_hold
+    from helpers.workspace import get_migration_peer_hold
 
     workspace = SimpleNamespace(id=1, team_id="T1", workspace_name="Workspace A")
     down = SimpleNamespace(instance_id="f" * 64, private_key_encrypted=None, status="active")
@@ -352,7 +352,7 @@ def test_import_names_a_refusal_over_a_peer_it_cannot_reach():
         patch("federation.core.teams_allowlist_payload", return_value={"workspaces": []}),
         patch("federation.core.push_teams", side_effect=push),
     ):
-        assert migration_peer_hold("T1") == ("refused", refusing)
+        assert get_migration_peer_hold("T1") == ("refused", refusing)
 
 
 def test_push_teams_keeps_its_default_statuses():

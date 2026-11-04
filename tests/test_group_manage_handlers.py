@@ -366,7 +366,7 @@ class TestGroupManagerNotices:
         assert group_dms.call_args.kwargs["exclude_workspace_id"] == ACTING_WS_ID
         assert group_dms.call_args.args[1] == notice
 
-    @patch("handlers.group.replace_group_invite_code")
+    @patch("helpers.replace_group_invite_code")
     def test_remove_skips_the_workspace_that_already_gets_channel_detail(self, rotate):
         actor = SimpleNamespace(id=ACTING_WS_ID, team_id="T1", workspace_name="Workspace A", deleted_at=None)
         target = SimpleNamespace(id=OTHER_WS_ID, team_id="T2", workspace_name="Workspace B", deleted_at=None)
@@ -438,7 +438,9 @@ class TestGroupManagerNotices:
         assert group_dms.call_args.kwargs["exclude_workspace_id"] == OTHER_WS_ID
         assert group_dms.call_args.args[1] == notice
         extra_dm.assert_not_called()
-        rotate.assert_called_once_with(GROUP_ID)
+        from handlers.group import _generate_invite_code
+
+        rotate.assert_called_once_with(GROUP_ID, _generate_invite_code)
 
 
 @pytest.fixture

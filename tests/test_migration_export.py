@@ -1234,11 +1234,11 @@ def _save_peer(
 
 def test_import_of_this_install_opens_the_review(real_db):
     from handlers.export_import import handle_data_migration_submit_ack
-    from helpers.export_import import build_migration_export, migration_file_status
+    from helpers.export_import import build_migration_export, get_migration_file_status
 
     local = _export_rows()
     payload = build_migration_export(local.id)
-    assert migration_file_status(payload)[0] == "this_install"
+    assert get_migration_file_status(payload)[0] == "this_install"
     body, text = _upload_body(payload)
     with (
         patch("handlers.export_import._is_admin", return_value=True),
@@ -1275,10 +1275,10 @@ def test_import_refuses_a_changed_file(real_db):
 
 def test_import_names_an_unknown_signer_by_id_prefix(real_db):
     from handlers.export_import import handle_data_migration_submit_ack
-    from helpers.export_import import migration_file_status
+    from helpers.export_import import get_migration_file_status
 
     payload, instance_id, _public = _peer_signed_file(name="Workspace A")
-    assert migration_file_status(payload)[0] == "unknown"
+    assert get_migration_file_status(payload)[0] == "unknown"
     local = _export_rows()
     body, text = _upload_body(payload)
     with (
@@ -1293,15 +1293,15 @@ def test_import_names_an_unknown_signer_by_id_prefix(real_db):
 
 
 def test_connected_file_is_named_from_the_saved_connection(real_db):
-    from helpers.export_import import migration_file_status, migration_source_name
+    from helpers.export_import import format_migration_source_name, get_migration_file_status
 
     payload, instance_id, public_pem = _peer_signed_file(name="Nope")
     peer = _save_peer(instance_id, public_pem, name="Partner Org")
     with patch("helpers.settings.federation_enabled", return_value=True):
-        kind, row = migration_file_status(payload)
+        kind, row = get_migration_file_status(payload)
     assert kind == "connected"
     assert row.instance_id == peer.instance_id
-    assert migration_source_name(instance_id, row) == "Partner Org"
+    assert format_migration_source_name(instance_id, row) == "Partner Org"
 
     from db import DbManager, schemas
 
@@ -1311,7 +1311,7 @@ def test_connected_file_is_named_from_the_saved_connection(real_db):
         {schemas.Instance.name: None, schemas.Instance.primary_workspace_name: "Workspace A"},
     )
     blank = DbManager.get_record(schemas.Instance, id=instance_id)
-    assert migration_source_name(instance_id, blank) == f"Connection {instance_id[:8]}"
+    assert format_migration_source_name(instance_id, blank) == f"Connection {instance_id[:8]}"
 
 
 def test_import_refuses_a_peer_that_is_not_an_active_connection(real_db):

@@ -817,7 +817,7 @@ def _migration_groups_not_joined(data: dict, workspace_id: int) -> list[str]:
     return names
 
 
-def _format_workspace_names(names: list[str]) -> str:
+def _format_names(names: list[str]) -> str:
     ticked = [f"`{name}`" for name in names]
     if len(ticked) == 1:
         return ticked[0]
@@ -827,7 +827,7 @@ def _format_workspace_names(names: list[str]) -> str:
 
 
 def _missing_workspaces_text(names: list[str], *, finished: bool = False) -> str:
-    label = _format_workspace_names(names)
+    label = _format_names(names)
     outcome = "were left out" if finished else "will not come over"
     if len(names) == 1:
         return (
@@ -841,7 +841,7 @@ def _missing_workspaces_text(names: list[str], *, finished: bool = False) -> str
 
 
 def _left_out_groups_text(names: list[str], *, finished: bool = False) -> str:
-    label = _format_workspace_names(names)
+    label = _format_names(names)
     if len(names) == 1:
         left_out = ", so it was left out" if finished else ""
         return (
@@ -884,7 +884,7 @@ def _import_finished_text(
     """
     peer_name = source_name
     if peer is not None:
-        peer_name = ei.migration_source_name(getattr(peer, "instance_id", "") or "", peer)
+        peer_name = ei.format_migration_source_name(getattr(peer, "instance_id", "") or "", peer)
     if has_pending and result == "waiting_for_uninstall":
         text = (
             ":white_check_mark: Import finished. This Workspace's Syncs show `Waiting for migration` "
@@ -936,16 +936,16 @@ def handle_data_migration_submit_ack(
     if data is None or group_id is None or team_id_to_workspace_id is None or workspace_record is None:
         return None
 
-    kind, signer = ei.migration_file_status(data)
+    kind, signer = ei.get_migration_file_status(data)
     if kind not in ("this_install", "connected"):
         source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else {}
-        name = ei.migration_source_name(str(source.get("instance_id") or ""), signer)
+        name = ei.format_migration_source_name(str(source.get("instance_id") or ""), signer)
         return {
             "response_action": "errors",
             "errors": {actions.CONFIG_DATA_MIGRATION_JSON_INPUT: _migration_refused_text(kind, name)},
         }
     source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else {}
-    source_name = ei.migration_source_name(str(source.get("instance_id") or ""), signer)
+    source_name = ei.format_migration_source_name(str(source.get("instance_id") or ""), signer)
     from helpers._cache import _cache_set
 
     _cache_set(
@@ -1101,20 +1101,20 @@ def _complete_data_migration_import(
     if not workspace_record:
         _notify_import_result(client, body, user_id, _IMPORT_FAIL_TEXT)
         return
-    kind, signer = ei.migration_file_status(data)
+    kind, signer = ei.get_migration_file_status(data)
     if kind not in ("this_install", "connected"):
         source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else {}
         instance_id = str(source.get("instance_id") or "")
         if signer is not None:
-            name = ei.migration_source_name(instance_id, signer)
+            name = ei.format_migration_source_name(instance_id, signer)
         else:
-            name = meta.get("source_name") or ei.migration_source_name(instance_id, None)
+            name = meta.get("source_name") or ei.format_migration_source_name(instance_id, None)
         _notify_import_result(client, body, user_id, _migration_stopped_text(kind, name))
         return
     if kind == "connected":
         team_id_to_workspace_id = _narrow_import_map(team_id_to_workspace_id, workspace_record, signer)
     source_name = (
-        ei.migration_source_name(getattr(signer, "instance_id", "") or "", signer)
+        ei.format_migration_source_name(getattr(signer, "instance_id", "") or "", signer)
         if signer is not None
         else (meta.get("source_name") or "Connection")
     )

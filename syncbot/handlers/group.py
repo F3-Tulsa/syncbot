@@ -31,34 +31,6 @@ def _generate_invite_code(length: int = 7) -> str:
     return f"{raw[:3]}-{raw[3:]}" if length >= 6 else raw
 
 
-def replace_group_invite_code(group_id: int) -> None:
-    """Give *group_id* a new local invite code.
-
-    Tries five codes. If every one is already on a Group, the current code
-    stays and ``group_invite_code_failed`` is logged without the code.
-    """
-    from sqlalchemy.exc import IntegrityError
-
-    for _ in range(5):
-        code = _generate_invite_code()
-        taken = DbManager.find_records(
-            schemas.WorkspaceGroup,
-            [schemas.WorkspaceGroup.invite_code == code],
-        )
-        if taken:
-            continue
-        try:
-            DbManager.update_records(
-                schemas.WorkspaceGroup,
-                [schemas.WorkspaceGroup.id == group_id],
-                {schemas.WorkspaceGroup.invite_code: code},
-            )
-        except IntegrityError:
-            continue
-        return
-    log_warning("group_invite_code_failed", group_id=group_id)
-
-
 def _activate_group_membership(
     client: WebClient,
     workspace_record: "schemas.Workspace",
