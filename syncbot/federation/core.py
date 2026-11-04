@@ -831,8 +831,6 @@ def push_file_part(
 
     if is_self_instance(fed_ws):
         return None
-    if not validate_webhook_url(fed_ws.webhook_url or ""):
-        return None
     url = (fed_ws.webhook_url or "").rstrip("/") + "/file"
     chunk_sha = _hashlib.sha256(payload).hexdigest()
     sign_body_str = f"POST:/api/federation/file:{sha256}:{part_index}:{total}:{chunk_sha}"
@@ -865,21 +863,23 @@ def push_file_part(
             data["_http_status"] = resp.status_code
         return resp.status_code, data if isinstance(data, dict) else None
 
-    try:
-        status, data = _once()
-        if status == 200:
-            return data
-        if status == 413 and isinstance(data, dict) and data.get("file_chunk_mb") is not None:
-            return data
-        if status >= 500:
+    data: dict | None = None
+    for attempt in range(2):
+        if attempt:
             time.sleep(_RETRY_BACKOFF[0])
+        refusal = _webhook_url_refusal(fed_ws.webhook_url or "")
+        if refusal == "lookup_failed":
+            continue
+        if refusal:
+            return None
+        try:
             status, data = _once()
-            if status == 200:
-                return data
-        return data
-    except Exception as exc:
-        log_warning("push_file_part_failed", error=str(exc), sha256=sha256)
-        return None
+        except Exception as exc:
+            log_warning("push_file_part_failed", error=str(exc), sha256=sha256)
+            return None
+        if status < 500:
+            return data
+    return data
 
 
 def push_message(fed_ws: schemas.Instance, payload: dict) -> dict | None:
@@ -1230,9 +1230,6 @@ def initiate_federation_connect(
     if not endpoint:
         log_error("federation_pair", direction="outbound", ok=False, reason="no_public_url")
         return None
-    if not validate_webhook_url(remote_url):
-        log_error("federation_pair", direction="outbound", ok=False, reason="invalid_remote_url")
-        return None
 
     _, public_key_pem = get_or_create_instance_keypair()
 
@@ -1251,6 +1248,14 @@ def initiate_federation_connect(
     sig, ts = federation_sign(body)
 
     for attempt in range(_MAX_RETRIES):
+        refusal = _webhook_url_refusal(remote_url)
+        if refusal == "lookup_failed":
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep(_RETRY_BACKOFF[attempt])
+            continue
+        if refusal:
+            log_error("federation_pair", direction="outbound", ok=False, reason="invalid_remote_url")
+            return None
         try:
             resp = requests.post(
                 url,

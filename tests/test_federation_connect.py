@@ -373,7 +373,7 @@ class TestEndpointAndSubpaths:
         resp.json.return_value = {"ok": True, "public_key": public_pem}
         with (
             patch.object(federation_core, "get_public_url", return_value="https://this-instance.example"),
-            patch.object(federation_core, "validate_webhook_url", return_value=True),
+            patch.object(federation_core, "_webhook_url_refusal", return_value=None),
             patch.object(federation_core, "get_or_create_instance_keypair", return_value=(_private, public_pem)),
             patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
             patch.object(federation_core, "get_instance_id", return_value="fp"),
@@ -454,6 +454,70 @@ class TestWebhookHostCheck:
         ):
             assert federation_core._federation_request(fed_ws, "/message", {"a": 1}) is None
         assert session.request.call_args.kwargs["allow_redirects"] is False
+
+    def test_file_part_retries_a_failed_lookup(self):
+        fed_ws = SimpleNamespace(webhook_url="https://peer.example/api/federation", instance_id="fp")
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"ok": True}
+        with (
+            patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
+            patch.object(federation_core, "get_instance_id", return_value="self"),
+            patch.object(federation_core, "_webhook_url_refusal", side_effect=["lookup_failed", None]),
+            patch.object(federation_core.requests, "post", return_value=resp) as post,
+            patch.object(federation_core.time, "sleep"),
+        ):
+            result = federation_core.push_file_part(fed_ws, sha256="ab", part_index=0, total=1, size=4, payload=b"data")
+        assert result["ok"] is True
+        post.assert_called_once()
+
+    def test_file_part_checks_the_host_before_its_retry(self):
+        fed_ws = SimpleNamespace(webhook_url="https://peer.example/api/federation", instance_id="fp")
+        resp = MagicMock(status_code=503)
+        resp.json.return_value = {"ok": False}
+        with (
+            patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
+            patch.object(federation_core, "get_instance_id", return_value="self"),
+            patch.object(federation_core, "_webhook_url_refusal", side_effect=[None, "refused"]),
+            patch.object(federation_core.requests, "post", return_value=resp) as post,
+            patch.object(federation_core.time, "sleep"),
+        ):
+            result = federation_core.push_file_part(fed_ws, sha256="ab", part_index=0, total=1, size=4, payload=b"data")
+        assert result is None
+        post.assert_called_once()
+
+    def test_pair_request_retries_a_failed_lookup(self):
+        _private, public_pem = _keypair()
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"ok": True}
+        with (
+            patch.object(federation_core, "get_public_url", return_value="https://this-instance.example"),
+            patch.object(federation_core, "get_or_create_instance_keypair", return_value=(_private, public_pem)),
+            patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
+            patch.object(federation_core, "get_instance_id", return_value="fp"),
+            patch.object(federation_core, "_webhook_url_refusal", side_effect=["lookup_failed", None]),
+            patch.object(federation_core.requests, "post", return_value=resp) as post,
+            patch.object(federation_core.time, "sleep"),
+        ):
+            result = federation_core.initiate_federation_connect("https://peer.example/api/federation", "FED-1")
+        assert result["ok"] is True
+        post.assert_called_once()
+
+    def test_pair_request_checks_the_host_before_its_retry(self):
+        _private, public_pem = _keypair()
+        resp = MagicMock(status_code=503)
+        resp.json.return_value = {"ok": False}
+        with (
+            patch.object(federation_core, "get_public_url", return_value="https://this-instance.example"),
+            patch.object(federation_core, "get_or_create_instance_keypair", return_value=(_private, public_pem)),
+            patch.object(federation_core, "federation_sign", return_value=("sig", "1")),
+            patch.object(federation_core, "get_instance_id", return_value="fp"),
+            patch.object(federation_core, "_webhook_url_refusal", side_effect=[None, "refused"]),
+            patch.object(federation_core.requests, "post", return_value=resp) as post,
+            patch.object(federation_core.time, "sleep"),
+        ):
+            result = federation_core.initiate_federation_connect("https://peer.example/api/federation", "FED-1")
+        assert result is None
+        post.assert_called_once()
 
 
 class TestEmptyUrlDm:
