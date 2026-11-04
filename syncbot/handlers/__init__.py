@@ -75,6 +75,7 @@ from handlers.group import (
     handle_invite_workspace_submit,
     handle_join_group,
     handle_join_group_submit,
+    handle_join_group_submit_ack,
 )
 from handlers.group_manage import (
     handle_demote_self,
@@ -167,6 +168,7 @@ __all__ = [
     "handle_invite_workspace_submit",
     "handle_join_group",
     "handle_join_group_submit",
+    "handle_join_group_submit_ack",
     "handle_demote_self",
     "handle_demote_self_confirm",
     "handle_disband_delete_history",

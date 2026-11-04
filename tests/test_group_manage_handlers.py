@@ -540,6 +540,77 @@ def _remove_patches(actor):
     )
 
 
+def test_a_workspace_that_left_can_be_invited_again(real_db):
+    import json
+    from datetime import UTC, datetime
+
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+    from handlers.group import handle_invite_workspace_submit
+    from slack.actions import CONFIG_INVITE_WORKSPACE_SELECT
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    instance_id = get_instance_id()
+    workspace_a = DbManager.create_record(
+        schemas.Workspace(team_id="TA", workspace_name="Workspace A", instance_id=instance_id)
+    )
+    workspace_b = DbManager.create_record(
+        schemas.Workspace(team_id="TB", workspace_name="Workspace B", instance_id=instance_id)
+    )
+    group = DbManager.create_record(
+        schemas.WorkspaceGroup(name="Shared", invite_code="GRP-TEST01", status="active", created_at=now, uid="g-left")
+    )
+    DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=workspace_a.id,
+            status="active",
+            role="owner",
+            joined_at=now,
+        )
+    )
+    ended = DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=workspace_b.id,
+            status="inactive",
+            role="member",
+            joined_at=now,
+            deleted_at=now,
+        )
+    )
+    body = {
+        "user": {"id": "U1"},
+        "view": {
+            "private_metadata": json.dumps({"group_id": group.id}),
+            "state": {
+                "values": {"b": {CONFIG_INVITE_WORKSPACE_SELECT: {"selected_option": {"value": str(workspace_b.id)}}}}
+            },
+        },
+    }
+    with (
+        patch("handlers.group._get_authorized_workspace", return_value=("U1", workspace_a)),
+        patch("handlers.group.helpers.format_admin_label", return_value="Ada Lovelace"),
+        patch("handlers.group.helpers.get_bot_token", return_value="xoxb-test"),
+        patch("handlers.group.helpers.send_group_invite_dm") as dm,
+        patch("handlers.group.builders.refresh_home_tab_for_workspace"),
+    ):
+        handle_invite_workspace_submit(body, MagicMock(), MagicMock(), {})
+    rows = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [
+            schemas.WorkspaceGroupMember.group_id == group.id,
+            schemas.WorkspaceGroupMember.workspace_id == workspace_b.id,
+        ],
+    )
+    pending = [row for row in rows if row.deleted_at is None]
+    still_ended = [row for row in rows if row.id == ended.id]
+    assert len(pending) == 1
+    assert pending[0].status == "pending"
+    assert still_ended[0].deleted_at is not None
+    dm.assert_called_once()
+
+
 def test_remove_gives_the_group_a_new_invite_code(real_db):
     from contextlib import ExitStack
 

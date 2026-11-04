@@ -163,8 +163,12 @@ def replicate_group_invite(
     set_role: bool = False,
     notice: str | None = None,
     announce: bool = False,
+    invited_by: schemas.Workspace | None = None,
 ) -> None:
-    """Tell peers (or one *peer*) that *workspace* joined *group*."""
+    """Tell peers (or one *peer*) that *workspace* joined *group*.
+
+    *invited_by* marks a new invite and names the Workspace that sent it. A snapshot never sets it.
+    """
     uid = ensure_group_uid(group)
     role = "member"
     if getattr(workspace, "id", None) and group.id:
@@ -188,6 +192,8 @@ def replicate_group_invite(
         payload["set_role"] = True
     if announce:
         payload["announce"] = True
+    if invited_by is not None:
+        payload["invited_by_team_id"] = invited_by.team_id
     _with_notice(payload, notice)
     targets = [peer] if peer is not None else peers_for_group(group.id)
     if peer is None and is_stub_workspace(workspace):

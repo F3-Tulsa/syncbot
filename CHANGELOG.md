@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- version list -->
 
+## [Unreleased]
+
+### Changed
+
+- NOTICE: Upgrade connected instances too; a Workspace on an instance still on 1.7.3 joins a Group invite without Accept
+- Invite Workspace and Join Group say that an Invite Code works only on this SyncBot instance
+
+### Fixed
+
+- An invite to a Workspace on another instance waits for that Workspace to accept, as it does on this instance
+- Declining or cancelling a Group invite updates both instances
+- A Workspace that left a Group can be invited again, and stays out until it accepts
+- Joining a Group with a code tells connected instances
+- Join Group shows an error when a code does not match a Group on this instance
 
 ## [1.7.3] - 2026-11-04
 

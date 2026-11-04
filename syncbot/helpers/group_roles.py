@@ -337,8 +337,9 @@ def upsert_group_membership(
 ) -> None:
     """One active membership for this group and workspace.
 
-    A soft-deleted row is reused. Extra active rows are soft-deleted, keeping
-    the oldest ``joined_at``.
+    A live row is kept before a soft-deleted one. Extra active rows are
+    soft-deleted, keeping the oldest ``joined_at``. A kept row with no
+    ``joined_at`` gets *now*.
     """
     rows = DbManager.find_records(
         schemas.WorkspaceGroupMember,
@@ -347,7 +348,7 @@ def upsert_group_membership(
             schemas.WorkspaceGroupMember.workspace_id == workspace_id,
         ],
     )
-    rows.sort(key=lambda row: (row.joined_at is None, row.joined_at or now, row.id or 0))
+    rows.sort(key=lambda row: (row.deleted_at is not None, row.joined_at is None, row.joined_at or now, row.id or 0))
     if not rows:
         DbManager.create_record(
             schemas.WorkspaceGroupMember(
@@ -370,6 +371,7 @@ def upsert_group_membership(
             schemas.WorkspaceGroupMember.status: "active",
             schemas.WorkspaceGroupMember.role: stored,
             schemas.WorkspaceGroupMember.deleted_at: None,
+            schemas.WorkspaceGroupMember.joined_at: keeper.joined_at or now,
         },
     )
     for extra in rows[1:]:

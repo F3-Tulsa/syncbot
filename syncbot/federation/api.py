@@ -834,6 +834,40 @@ def _post_carried_group_notice(group_id: int, body: dict) -> None:
     notify_group_managers(group_id, text)
 
 
+def _start_peer_group_invite(group, workspace, body: dict, fed_ws: schemas.Instance) -> None:
+    """Write a pending invite for this instance's *workspace* and DM its managers Accept and Decline."""
+    invited_by_id = None
+    raw_team = body.get("invited_by_team_id")
+    if isinstance(raw_team, str) and raw_team.strip():
+        stub = _stub_workspace_for_peer(fed_ws, raw_team.strip())
+        if stub is not None:
+            invited_by_id = stub.id
+    member = DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=workspace.id,
+            status="pending",
+            role="member",
+            joined_at=None,
+            invited_by_workspace_id=invited_by_id,
+        )
+    )
+    notice = body.get("notice")
+    text = notice.strip() if isinstance(notice, str) else ""
+    if not text:
+        from helpers.sync_participation import format_action_notice
+
+        text = format_action_notice(
+            action="Invite",
+            workspace_name=helpers.resolve_workspace_name(workspace),
+            group_name=group.name,
+            for_managers=True,
+            workspace_line=True,
+        )
+    helpers.send_group_invite_dm(member, workspace, text)
+    invalidate_home_tab_caches_for_team(workspace.team_id)
+
+
 def _invalidate_replicated_group_homes(group_id: int, sync_id: int | None = None) -> None:
     """Drop Home hashes so replicated members and Channels show without a forced Refresh."""
     from helpers.export_import import invalidate_group_member_homes
@@ -1672,7 +1706,7 @@ def handle_group_upsert(body: dict, fed_ws: schemas.Instance) -> tuple[int, dict
 
 
 def handle_group_invite(body: dict, fed_ws: schemas.Instance) -> tuple[int, dict]:
-    """Add a local or stub workspace to a group by uid + team_id."""
+    """Add a peer's own Workspace to a group, or ask one of this instance's Workspaces to accept."""
     err = _validate_fields(body, ["uid", "team_id"])
     if err:
         return 400, {"error": err}
@@ -1704,6 +1738,12 @@ def handle_group_invite(body: dict, fed_ws: schemas.Instance) -> tuple[int, dict
     )
     # set_role is Promote, Give Up Ownership, and succession. A snapshot invite omits it.
     set_role = body.get("set_role") is True
+    live = [row for row in prior if row.deleted_at is None]
+    if helpers.is_local_workspace(ws) and not (set_role and any(row.status == "active" for row in live)):
+        if not set_role and not live and (not prior or body.get("invited_by_team_id")):
+            _start_peer_group_invite(group, ws, body, fed_ws)
+        _invalidate_replicated_group_homes(group.id)
+        return 200, {"ok": True}
     incoming = file_membership_role(body.get("role"), "member") if set_role else "member"
     upsert_group_membership(
         group.id,
@@ -1795,6 +1835,7 @@ def handle_workspace_release(body: dict, fed_ws: schemas.Instance) -> tuple[int,
 
 
 def handle_group_leave(body: dict, fed_ws: schemas.Instance) -> tuple[int, dict]:
+    """Mark a membership left. A pending row is an invite. End it as Decline and Cancel do."""
     err = _validate_fields(body, ["uid", "team_id"])
     if err:
         return 400, {"error": err}
@@ -1810,11 +1851,29 @@ def handle_group_leave(body: dict, fed_ws: schemas.Instance) -> tuple[int, dict]
     if not ws:
         return 200, {"ok": True}
     _post_carried_group_notice(groups[0].id, body)
+    pending = DbManager.find_records(
+        schemas.WorkspaceGroupMember,
+        [
+            schemas.WorkspaceGroupMember.group_id == groups[0].id,
+            schemas.WorkspaceGroupMember.workspace_id == ws.id,
+            schemas.WorkspaceGroupMember.status == "pending",
+        ],
+    )
+    notice = body.get("notice")
+    if isinstance(notice, str) and notice.strip():
+        for row in pending:
+            helpers.update_group_invite_dms(row, ws, notice.strip())
+    for row in pending:
+        DbManager.delete_records(
+            schemas.WorkspaceGroupMember,
+            [schemas.WorkspaceGroupMember.id == row.id],
+        )
     DbManager.update_records(
         schemas.WorkspaceGroupMember,
         [
             schemas.WorkspaceGroupMember.group_id == groups[0].id,
             schemas.WorkspaceGroupMember.workspace_id == ws.id,
+            schemas.WorkspaceGroupMember.status != "pending",
         ],
         {
             schemas.WorkspaceGroupMember.status: "left",

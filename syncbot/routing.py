@@ -159,6 +159,7 @@ VIEW_ACK_MAPPER = {
     actions.CONFIG_JOIN_EXTERNAL_CONNECTION_SUBMIT: handlers.handle_join_external_connection_submit_ack,
     actions.CONFIG_JOIN_EXTERNAL_CONNECTION_REVIEW: handlers.handle_join_external_connection_review_ack,
     actions.CONFIG_EDIT_EXTERNAL_CONNECTION_SUBMIT: handlers.handle_edit_external_connection_submit_ack,
+    actions.CONFIG_JOIN_GROUP_SUBMIT: handlers.handle_join_group_submit_ack,
 }
 """Deferred-ack view submissions: fast ack handler (``dict`` or ``None`` for Slack ``ack()``)."""
 

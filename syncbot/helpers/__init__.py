@@ -111,6 +111,8 @@ from helpers.notifications import (
     notify_user_dm,
     purge_stale_soft_deletes,
     save_dm_messages_to_group_member,
+    send_group_invite_dm,
+    update_group_invite_dms,
 )
 from helpers.oauth import (
     capture_public_base,
@@ -414,6 +416,8 @@ __all__ = [
     "run_auto_map_for_workspace",
     "safe_get",
     "save_dm_messages_to_group_member",
+    "send_group_invite_dm",
+    "update_group_invite_dms",
     "seed_user_mappings",
     "auto_map_running_key",
     "format_last_auto_map_line",

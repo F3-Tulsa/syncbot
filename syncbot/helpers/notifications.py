@@ -12,6 +12,7 @@ from helpers._cache import _cache_get, _cache_set
 from helpers.core import safe_get
 from helpers.workspace import get_bot_token
 from logger import log_debug, log_error, log_info, log_warning
+from slack import actions
 
 
 def get_admin_ids(
@@ -177,6 +178,92 @@ def notify_admins_dm_blocks(
             log_warning("notify_admins_dm_blocks", user_id=user_id, error=str(e))
 
     return sent
+
+
+def send_group_invite_dm(member: schemas.WorkspaceGroupMember, workspace: schemas.Workspace, text: str) -> None:
+    """DM *workspace*'s managers the invite *text* with Accept and Decline, and keep the DMs on *member*."""
+    token = get_bot_token(workspace)
+    if not token:
+        return
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": text,
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":white_check_mark: Accept"},
+                    "style": "primary",
+                    "action_id": f"{actions.CONFIG_ACCEPT_GROUP_INVITE}_{member.id}",
+                    "value": str(member.id),
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":eject: Decline"},
+                    "style": "danger",
+                    "action_id": f"{actions.CONFIG_DECLINE_GROUP_INVITE}_{member.id}",
+                    "value": str(member.id),
+                },
+            ],
+        },
+    ]
+    entries = notify_admins_dm_blocks(WebClient(token=token), text, blocks, team_id=workspace.team_id)
+    save_dm_messages_to_group_member(member.id, entries)
+
+
+def update_group_invite_dms(
+    member: schemas.WorkspaceGroupMember,
+    workspace: schemas.Workspace | None,
+    new_text: str,
+) -> None:
+    """Replace the original invite DM content with an updated message so the invite
+    is removed and replaced by the success message (e.g. workspace joined the group).
+    """
+    if not member.dm_messages:
+        log_debug("invite_dm_update_skipped", member_id=member.id)
+        return
+    if not workspace or not get_bot_token(workspace):
+        return
+
+    try:
+        entries = json.loads(member.dm_messages)
+    except (ValueError, TypeError):
+        log_warning("invite_dm_messages_invalid", member_id=member.id)
+        return
+
+    if not entries:
+        return
+
+    ws_client = WebClient(token=get_bot_token(workspace))
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": new_text}}]
+    for entry in entries:
+        channel_id = entry.get("channel")
+        message_ts = entry.get("ts")
+        if not channel_id or message_ts is None:
+            continue
+        message_ts_str = str(message_ts).strip()
+        if not message_ts_str:
+            continue
+        try:
+            ws_client.chat_update(
+                channel=channel_id,
+                ts=message_ts_str,
+                text=new_text,
+                blocks=blocks,
+            )
+        except Exception as e:
+            log_warning(
+                "invite_dm_update_failed",
+                channel_id=channel_id,
+                ts=message_ts_str,
+                error=str(e),
+            )
 
 
 def save_dm_messages_to_group_member(member_id: int, dm_entries: list[dict]) -> None:
