@@ -828,11 +828,18 @@ def restore_migrated_workspace(team_id: str, *, context: dict | None = None) -> 
     )
 
 
+_HOLD_REFUSED_STATUSES = frozenset({401, 403, 404})
+_HOLD_ANSWER_STATUSES = frozenset({200, 409}) | _HOLD_REFUSED_STATUSES
+
+
 def migration_peer_hold(team_id: str) -> tuple[str, schemas.Instance | None]:
     """``(hold, peer)`` before pending Channels resume.
 
-    ``hold`` is ``no_peer``, ``released``, ``still_hosted``, or ``unreachable``.
-    ``peer`` is the instances row behind ``still_hosted`` or ``unreachable``.
+    ``hold`` is ``no_peer``, ``released``, ``still_hosted``, ``refused``, or
+    ``unreachable``. ``peer`` is the instances row behind the last three.
+    ``refused`` is a 401, 403, or 404 answer. ``unreachable`` is no answer.
+    ``still_hosted`` wins over ``refused``, and ``refused`` wins over
+    ``unreachable``.
     A missing team, a missing Workspace, or a Workspace that is not local is
     ``released`` and does not call ``/teams``. No trusted peer is ``no_peer``.
     The push is today's allowlist payload with this team appended when it is
@@ -857,20 +864,27 @@ def migration_peer_hold(team_id: str) -> tuple[str, schemas.Instance | None]:
     peers = [peer for peer in peers if peer_is_trusted(peer)]
     if not peers:
         return "no_peer", None
+    refused: schemas.Instance | None = None
     unreachable: schemas.Instance | None = None
     for peer in peers:
         payload = teams_allowlist_payload(peer.instance_id)
         listed = payload.setdefault("workspaces", [])
         if not any(item.get("team_id") == team_id for item in listed):
             listed.append({"team_id": team_id, "name": workspace.workspace_name or team_id})
-        result = push_teams(peer, payload)
+        result = push_teams(peer, payload, accept_statuses=_HOLD_ANSWER_STATUSES)
         if not result:
             if unreachable is None:
                 unreachable = peer
             continue
+        if result.get("_http_status") in _HOLD_REFUSED_STATUSES:
+            if refused is None:
+                refused = peer
+            continue
         answer = (result.get("results") or {}).get(team_id)
         if answer in ("refused_live", None):
             return "still_hosted", peer
+    if refused is not None:
+        return "refused", refused
     if unreachable is not None:
         return "unreachable", unreachable
     return "released", None
@@ -882,14 +896,14 @@ def peer_still_hosts_team(team_id: str) -> bool:
     No trusted peer means this instance is the only one, so the team is not held.
     """
     hold, _peer = migration_peer_hold(team_id)
-    return hold in ("still_hosted", "unreachable")
+    return hold in ("still_hosted", "refused", "unreachable")
 
 
 def consider_migration_release(team_id: str) -> tuple[str, schemas.Instance | None]:
     """Hold or resume pending Channels after import.
 
     Returns ``(result, peer)``. ``resumed`` restores pending Channels.
-    ``waiting_for_uninstall`` and ``unreachable`` leave them pending.
+    ``waiting_for_uninstall``, ``refused``, and ``unreachable`` leave them pending.
     A missing team, a missing Workspace, or a Workspace that is not local
     returns ``resumed`` and does not restore or call ``/teams``.
     """
@@ -904,8 +918,8 @@ def consider_migration_release(team_id: str) -> tuple[str, schemas.Instance | No
     hold, peer = migration_peer_hold(team_id)
     if hold == "still_hosted":
         return "waiting_for_uninstall", peer
-    if hold == "unreachable":
-        return "unreachable", peer
+    if hold in ("refused", "unreachable"):
+        return hold, peer
     restore_migrated_workspace(team_id)
     return "resumed", None
 

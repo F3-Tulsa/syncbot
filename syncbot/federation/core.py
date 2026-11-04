@@ -993,20 +993,26 @@ def push_users(fed_ws: schemas.Instance, payload: dict) -> dict | None:
     return merged
 
 
-def push_teams(fed_ws: schemas.Instance, payload: dict) -> dict | None:
+def push_teams(
+    fed_ws: schemas.Instance,
+    payload: dict,
+    *,
+    accept_statuses: frozenset[int] = frozenset({200, 409}),
+) -> dict | None:
     """Advertise this instance's Workspaces so the peer can create/heal stubs.
 
     *payload* carries ``workspaces`` (``team_id`` + display ``name``),
     ``primary_team_id``, ``primary_workspace_name``, and ``app_name``. The peer heals each
     listed team and pauses this peer's stubs that left the allowlist. Trust
-    stays the fingerprint. ``409 owner_on_connection`` is accepted.
+    stays the fingerprint. ``409 owner_on_connection`` is accepted. A caller
+    that passes more *accept_statuses* reads ``_http_status`` on the answer.
     """
     return _federation_request(
         fed_ws,
         "/teams",
         payload,
         timeout=_REQUEST_TIMEOUT,
-        accept_statuses=frozenset({200, 409}),
+        accept_statuses=accept_statuses,
     )
 
 

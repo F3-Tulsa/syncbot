@@ -663,6 +663,7 @@ class TestDataMigrationImportConnect:
             (("resumed", None), [], "This Workspace's Syncs are running."),
             (("waiting_for_uninstall", peer), [pending], "Waiting for migration"),
             (("unreachable", peer), [pending], "couldn't reach `Partner Org`"),
+            (("refused", peer), [pending], "`Partner Org` did not accept SyncBot's check"),
         ]
         for release, rows, expected in cases:
 

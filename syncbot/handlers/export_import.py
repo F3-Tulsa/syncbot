@@ -933,6 +933,13 @@ def _import_finished_text(
             f"SyncBot couldn't reach `{peer_name}` to check whether it still has this Workspace, "
             "so its Syncs show `Waiting for migration`. Try the import again in a few minutes."
         )
+    elif result == "refused":
+        text = (
+            f":warning: Import could not finish. `{peer_name}` did not accept SyncBot's check, "
+            "so this Workspace's Syncs show `Waiting for migration`. "
+            f"A primary Workspace admin can check the External Connection with `{peer_name}`, "
+            "then import this file again."
+        )
     elif source_kind == "connected":
         text = running_connected
     else:
