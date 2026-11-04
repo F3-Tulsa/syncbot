@@ -18,7 +18,7 @@ There are no slash commands.
 
 These paths exist only when **Federation** is on in Settings. Otherwise the instance returns **404** for every `/api/federation*` path, including ping.
 
-Once the request has the `SyncBot-Federation` User-Agent and federation is on, missing or malformed headers are **400** and a well-formed but untrusted signature is **401**. **404** is for no User-Agent, federation off, an unknown path, an unknown pairing code, or a missing channel/group/sync after a good verify. A request whose sender id is this instance's own id is refused. A signed `/pair` whose code is already used answers 200 when that peer is already saved with the same public key.
+Once the request has the `SyncBot-Federation` User-Agent and federation is on, missing or malformed headers are **400** and a well-formed but untrusted signature is **401**. **404** is for no User-Agent, federation off, an unknown path, an unknown pairing code, or a missing channel/group/sync after a good verify. A request whose sender id is this instance's own id is refused. A signed `/pair` whose code is already used answers 200 when that peer is already connected and trusted, with the same public key.
 
 | Status | When |
 |--------|------|

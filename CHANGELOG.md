@@ -19,10 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A file hosted outside Slack, such as a Google Drive file, is copied as a link
 - Export names the instance that made the file, and Import checks the file's signature with that instance's key
 - A new External Connection gets the other instance's Workspaces on its next keep-warm
-
-### Removed
-
-- Export and Request Connection. Use Export for the file, and Create Connection and Join for the connection
+- Export and Request Connection is removed. Use Export for the file, and Create Connection and Join for the connection
 
 ### Fixed
 
