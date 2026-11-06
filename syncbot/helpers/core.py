@@ -80,11 +80,12 @@ def get_user_id_from_body(body: dict) -> str | None:
 
 
 def get_team_id_from_body(body: dict) -> str | None:
-    """Extract the Slack team ID from any Slack request payload.
+    """Return the Workspace this event is about.
 
     Order: ``view.team_id``, ``event.view.team_id``, ``team.id``, ``team_id``,
-    ``user.team_id``, then ``event.team`` when it is a string. Slack payloads
-    do not set two different team ids at once.
+    ``user.team_id``, then ``event.team`` when it is a string. The install that
+    authorized the request is ``context["team_id"]``, which can name a different
+    Workspace. Do not use this value to choose that install's client or token.
     """
     team = (
         safe_get(body, "view", "team_id")

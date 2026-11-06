@@ -153,8 +153,31 @@ def get_allowed_local_workspace_ids(instance_id: str) -> set[int]:
 # ``get_federated_workspace_for_sync`` anymore.
 
 
+def is_request_for_team(context: dict | None, team_id: str | None) -> bool:
+    """True when this request was authorized for *team_id*.
+
+    Bolt sets ``context["team_id"]`` to the install that authorized the request.
+    ``client`` and ``context["bot_token"]`` belong to that install.
+    """
+    if not team_id or not context:
+        return False
+    return safe_get(context, "team_id") == team_id
+
+
+def _log_other_install(team_id: str, context: dict | None) -> None:
+    log_info(
+        "workspace_lookup_other_team",
+        team_id=team_id,
+        request_team_id=safe_get(context, "team_id") if context else None,
+    )
+
+
 def get_workspace_record(team_id: str, body: dict, context: dict, client: WebClient) -> schemas.Workspace | None:
-    """Fetch or create the Workspace record for a Slack workspace."""
+    """Fetch or create the Workspace record for a Slack workspace.
+
+    Create, restore, and token or name refresh run only when the request was
+    authorized for *team_id*.
+    """
     from federation.core import get_instance_id
     from helpers.settings import team_id_is_blocked
 
@@ -167,10 +190,14 @@ def get_workspace_record(team_id: str, body: dict, context: dict, client: WebCli
             return DbManager.get_record(schemas.Workspace, id=team_id)
         return workspace_record
 
+    own_install = is_request_for_team(context, team_id)
     team_domain = safe_get(body, "team", "domain")
     announce_live = False
 
     if not workspace_record:
+        if not own_install:
+            _log_other_install(team_id, context)
+            return None
         try:
             team_info = client.team_info()
             ws_name = team_info["team"]["name"]
@@ -186,9 +213,12 @@ def get_workspace_record(team_id: str, body: dict, context: dict, client: WebCli
         )
         announce_live = True
     elif workspace_record.deleted_at is not None or _is_stub_workspace(workspace_record):
+        if not own_install:
+            _log_other_install(team_id, context)
+            return None
         workspace_record = _restore_workspace(workspace_record, context, client)
         announce_live = True
-    else:
+    elif own_install:
         _maybe_refresh_bot_token(workspace_record, context)
         _maybe_refresh_workspace_name(workspace_record, client)
 
@@ -239,7 +269,9 @@ def _push_live_team_to_trusted_peers(team_id: str) -> None:
 
 
 def _maybe_refresh_bot_token(workspace_record: schemas.Workspace, context: dict) -> None:
-    """Update Bolt ``slack_bots`` when the request context has a newer bot token."""
+    """Update Bolt ``slack_bots`` when this install's request has a newer bot token."""
+    if not is_request_for_team(context, getattr(workspace_record, "team_id", None)):
+        return
     new_token = safe_get(context, "bot_token")
     if not new_token or not workspace_record.team_id:
         return

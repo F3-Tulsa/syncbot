@@ -768,6 +768,67 @@ class TestBotAndDelete:
         assert "no publisher" not in others.call_args.args[2]
         leave.assert_not_called()
 
+    def _pause_patches(self):
+        return (
+            patch("helpers.sync_lifecycle.notify_channel_or_managers"),
+            patch("helpers.sync_lifecycle.notify_managers"),
+            patch("helpers.sync_lifecycle.post_to_other_sync_channels"),
+            patch("helpers.leave_sync._leave_channel_id"),
+            patch("helpers.sync_lifecycle.get_bot_token", return_value="xoxb"),
+            patch("helpers.workspace_kind.is_local_workspace", return_value=True),
+        )
+
+    def test_bot_left_pauses_the_install_workspace(self, real_db):
+        from handlers.channel_events import handle_member_left_channel
+
+        workspace_a = _workspace(team_id="T0000000A", name="Workspace A")
+        workspace_b = _workspace(team_id="T0000000B", name="Workspace B")
+        row_a = _channel(_sync(), workspace_a, channel_id="C0SHARED", user_id="UADA")
+        row_b = _channel(_sync(title="other"), workspace_b, channel_id="C0SHARED", user_id="UBOB")
+        body = {
+            "team_id": "T0000000B",
+            "event": {"type": "member_left_channel", "user": "U0BOTA", "channel": "C0SHARED"},
+        }
+        context = {"team_id": "T0000000A", "bot_user_id": "U0BOTA"}
+        with ExitStack() as stack:
+            for item in self._pause_patches():
+                stack.enter_context(item)
+            handle_member_left_channel(body, MagicMock(), MagicMock(), context)
+        assert _reload(row_a).status == "paused"
+        assert _reload(row_b).status == "active"
+
+    def test_channel_left_pauses_the_install_workspace(self, real_db):
+        from handlers.channel_events import handle_channel_left
+
+        workspace_a = _workspace(team_id="T0000000A", name="Workspace A")
+        workspace_b = _workspace(team_id="T0000000B", name="Workspace B")
+        row_a = _channel(_sync(), workspace_a, channel_id="C0SHARED", user_id="UADA")
+        row_b = _channel(_sync(title="other"), workspace_b, channel_id="C0SHARED", user_id="UBOB")
+        body = {"team_id": "T0000000B", "event": {"type": "channel_left", "channel": "C0SHARED"}}
+        context = {"team_id": "T0000000A", "bot_user_id": "U0BOTA"}
+        with ExitStack() as stack:
+            for item in self._pause_patches():
+                stack.enter_context(item)
+            handle_channel_left(body, MagicMock(), MagicMock(), context)
+        assert _reload(row_a).status == "paused"
+        assert _reload(row_b).status == "active"
+
+    def test_bot_left_without_install_team_uses_the_event_workspace(self, real_db):
+        from handlers.channel_events import handle_member_left_channel
+
+        workspace = _workspace(team_id="T0000000A", name="Workspace A")
+        row = _channel(_sync(), workspace, channel_id="C0SHARED", user_id="UADA")
+        body = {
+            "team_id": "T0000000A",
+            "event": {"type": "member_left_channel", "user": "U0BOTA", "channel": "C0SHARED"},
+        }
+        with ExitStack() as stack:
+            stack.enter_context(patch("handlers.channel_events.get_own_bot_user_id", return_value="U0BOTA"))
+            for item in self._pause_patches():
+                stack.enter_context(item)
+            handle_member_left_channel(body, MagicMock(), MagicMock(), {})
+        assert _reload(row).status == "paused"
+
     def test_channel_deleted_purges_only_this_workspaces_live_rows(self, real_db):
         from handlers import channel_events
 

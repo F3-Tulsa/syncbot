@@ -80,7 +80,7 @@ class TestBotTokenRefresh:
     def test_same_plaintext_does_not_update(self):
         token = "xoxb-same-token-value"
         workspace = SimpleNamespace(id=1, team_id="T1", deleted_at=None, instance_id="a" * 64)
-        context = {"bot_token": token}
+        context = {"bot_token": token, "team_id": "T1"}
 
         with (
             patch("helpers.workspace.get_bot_token", return_value=token),
@@ -93,7 +93,7 @@ class TestBotTokenRefresh:
     @patch.dict(os.environ, {"DATA_ENCRYPTION_KEY": "refresh-test-key-16", "SLACK_CLIENT_ID": "111.222"})
     def test_different_plaintext_updates_once(self):
         workspace = SimpleNamespace(id=1, team_id="T1", deleted_at=None, instance_id="a" * 64)
-        context = {"bot_token": "xoxb-new"}
+        context = {"bot_token": "xoxb-new", "team_id": "T1"}
         bot = SimpleNamespace(
             bot_token="xoxb-old",
             app_id=None,
@@ -115,6 +115,19 @@ class TestBotTokenRefresh:
             store_cls.return_value.find_bot.return_value = bot
             _maybe_refresh_bot_token(workspace, context)
             store_cls.return_value.save_bot.assert_called_once()
+
+    @patch.dict(os.environ, {"DATA_ENCRYPTION_KEY": "refresh-test-key-16", "SLACK_CLIENT_ID": "111.222"})
+    def test_other_team_context_does_not_save_bot(self):
+        workspace = SimpleNamespace(id=1, team_id="T1", deleted_at=None, instance_id="a" * 64)
+        context = {"bot_token": "xoxb-other", "team_id": "T0000000A"}
+
+        with (
+            patch("helpers.workspace.get_bot_token", return_value="xoxb-old"),
+            patch("helpers.encryption_installation_store.EncryptedSQLAlchemyInstallationStore") as store_cls,
+        ):
+            store_cls.return_value.save_bot = MagicMock()
+            _maybe_refresh_bot_token(workspace, context)
+            store_cls.return_value.save_bot.assert_not_called()
 
 
 class TestEncryptedInstallationStore:

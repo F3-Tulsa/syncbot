@@ -257,6 +257,23 @@ class TestBodyIdExtractors:
         assert helpers.get_team_id_from_body(body) == "T_JOIN"
 
 
+class TestIsRequestForTeam:
+    def test_matches_the_install_team(self):
+        assert helpers.is_request_for_team({"team_id": "T0000000A"}, "T0000000A") is True
+
+    def test_other_team_does_not_match(self):
+        assert helpers.is_request_for_team({"team_id": "T0000000A"}, "T0000000B") is False
+
+    def test_missing_context_does_not_match(self):
+        assert helpers.is_request_for_team(None, "T0000000A") is False
+
+    def test_context_without_team_does_not_match(self):
+        assert helpers.is_request_for_team({}, "T0000000A") is False
+
+    def test_missing_team_does_not_match(self):
+        assert helpers.is_request_for_team({"team_id": "T0000000A"}, None) is False
+
+
 # -----------------------------------------------------------------------
 # slack_retry decorator
 # -----------------------------------------------------------------------

@@ -280,4 +280,4 @@ def refresh_home_after_oauth_install(installation) -> None:
 
     client = WebClient(token=bot_token)
     body = {"team": {"id": team_id}, "user": {"id": user_id}}
-    builders.build_home_tab(body, client, logging.getLogger("syncbot"), {}, user_id=user_id)
+    builders.build_home_tab(body, client, logging.getLogger("syncbot"), {"team_id": team_id}, user_id=user_id)

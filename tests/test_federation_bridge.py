@@ -2316,7 +2316,12 @@ def test_reinstall_reclaims_stub_to_local(real_db):
     _sync, _local_sc, stub_sc = _seed_shared_sync(peer)
     client = MagicMock()
     with patch("helpers.workspace.resume_restored_sync_channels", return_value={}):
-        restored = get_workspace_record(peer["stub"].team_id, {"team": {"id": peer["stub"].team_id}}, {}, client)
+        restored = get_workspace_record(
+            peer["stub"].team_id,
+            {"team": {"id": peer["stub"].team_id}},
+            {"team_id": peer["stub"].team_id},
+            client,
+        )
     assert is_local_workspace(restored)
     assert restored.deleted_at is None
     channel = DbManager.get_record(schemas.SyncChannel, id=stub_sc.id)
@@ -3170,7 +3175,7 @@ def test_install_and_uninstall_name_the_slack_app(real_db, monkeypatch):
         get_workspace_record(
             peer["stub"].team_id,
             {"user": {"id": "UADA"}, "team": {"id": peer["stub"].team_id}},
-            {},
+            {"team_id": peer["stub"].team_id},
             client,
         )
         install = client.chat_postMessage.call_args.kwargs["text"]
