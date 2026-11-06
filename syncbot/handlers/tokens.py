@@ -104,7 +104,7 @@ def _republish_home_after_user_revoke(team_id: str, user_id: str, logger: Logger
             {"team": {"id": team_id}, "user": {"id": user_id}},
             client,
             logger,
-            {},
+            {"team_id": team_id},
             user_id=user_id,
         )
     except SlackApiError as exc:

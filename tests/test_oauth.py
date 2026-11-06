@@ -213,7 +213,7 @@ class TestRefreshHomeAfterOauthInstall:
         assert body == {"team": {"id": "T1"}, "user": {"id": "U9"}}
         assert client.token == "xoxb-bot"
         assert build.call_args.kwargs["user_id"] == "U9"
-        assert context == {}
+        assert context == {"team_id": "T1"}
 
     def test_skips_when_installation_is_incomplete(self):
         from types import SimpleNamespace

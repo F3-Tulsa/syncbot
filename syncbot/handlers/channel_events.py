@@ -21,11 +21,16 @@ def handle_member_left_channel(body: dict, client: WebClient, logger: Logger, co
 def _member_left_channel(body: dict, client: WebClient, logger: Logger, context: dict) -> None:
     workspace, channel_id = _event_workspace_and_channel(body)
     user_id = (body.get("event") or {}).get("user")
-    if not workspace or not channel_id or not user_id:
+    if not channel_id or not user_id:
         return
     bot_user_id = context.get("bot_user_id") or get_own_bot_user_id(client, context=context)
     if user_id == bot_user_id:
-        _pause_bot_left(workspace, channel_id)
+        install_workspace = _workspace_whose_bot_left(body, context, workspace)
+        if install_workspace is None:
+            return
+        _pause_bot_left(install_workspace, channel_id)
+        return
+    if not workspace:
         return
     helpers.note_private_channel_membership(client, workspace.team_id, user_id, channel_id)
     ended = soft_delete_sync_channels(workspace, channel_id, "manager_left", synced_by_user_id=user_id)
@@ -44,7 +49,8 @@ def handle_channel_left(body: dict, client: WebClient, logger: Logger, context: 
 
 
 def _channel_left(body: dict, client: WebClient, logger: Logger, context: dict) -> None:
-    workspace, channel_id = _event_workspace_and_channel(body)
+    event_workspace, channel_id = _event_workspace_and_channel(body)
+    workspace = _workspace_whose_bot_left(body, context, event_workspace)
     if workspace and channel_id:
         _pause_bot_left(workspace, channel_id)
 
@@ -58,6 +64,18 @@ def _channel_deleted(body: dict, client: WebClient, logger: Logger, context: dic
     workspace, channel_id = _event_workspace_and_channel(body)
     if workspace and channel_id:
         purge_slack_deleted_channel(workspace, channel_id)
+
+
+def _workspace_whose_bot_left(
+    body: dict,
+    context: dict | None,
+    event_workspace: schemas.Workspace | None,
+) -> schemas.Workspace | None:
+    """The install whose bot left, or the event Workspace when the install is unknown."""
+    install_team = (context or {}).get("team_id")
+    if not install_team:
+        return event_workspace
+    return DbManager.get_record(schemas.Workspace, id=install_team)
 
 
 def _event_workspace_and_channel(body: dict) -> tuple[schemas.Workspace | None, str | None]:
