@@ -327,3 +327,121 @@ class TestPurgeWorkspace:
         assert len(remaining) == 1
         channels = DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.sync_id == sync.id])
         assert [c.workspace_id for c in channels] == [publisher.id]
+
+    def test_purge_removes_workspace_settings(self, real_db):
+        import helpers
+
+        workspace, _, _ = _build_sync()
+        DbManager.create_record(
+            schemas.WorkspaceSetting(workspace_id=workspace.id, key="allow_private_channels", value="no")
+        )
+
+        helpers.purge_workspace(workspace.id)
+
+        assert DbManager.find_records(schemas.Workspace, [schemas.Workspace.id == workspace.id]) == []
+        assert (
+            DbManager.find_records(schemas.WorkspaceSetting, [schemas.WorkspaceSetting.workspace_id == workspace.id])
+            == []
+        )
+
+    def test_purge_removes_allowlist_and_pending_stub_rows(self, real_db):
+        import helpers
+
+        workspace, _, _ = _build_sync()
+        instance_id = get_instance_id()
+        DbManager.create_record(
+            schemas.FederationWorkspaceAllowlist(instance_id=instance_id, workspace_id=workspace.id)
+        )
+        DbManager.create_record(schemas.FederationPendingStub(instance_id=instance_id, workspace_id=workspace.id))
+
+        helpers.purge_workspace(workspace.id)
+
+        assert (
+            DbManager.find_records(
+                schemas.FederationWorkspaceAllowlist,
+                [schemas.FederationWorkspaceAllowlist.workspace_id == workspace.id],
+            )
+            == []
+        )
+        assert (
+            DbManager.find_records(
+                schemas.FederationPendingStub,
+                [schemas.FederationPendingStub.workspace_id == workspace.id],
+            )
+            == []
+        )
+
+    def test_purge_clears_source_on_other_workspaces_copies(self, real_db):
+        import helpers
+
+        source, _, _ = _build_sync()
+        other = DbManager.create_record(
+            schemas.Workspace(team_id="T_OTHER", workspace_name="Other", instance_id=get_instance_id())
+        )
+        sync = DbManager.create_record(schemas.Sync(title="Copy", sync_mode="group", uid=str(uuid4())))
+        channel = DbManager.create_record(
+            schemas.SyncChannel(
+                sync_id=sync.id,
+                workspace_id=other.id,
+                channel_id="C_OTHER",
+                status="active",
+                created_at=_now(),
+            )
+        )
+        copy = DbManager.create_record(
+            schemas.PostMeta(
+                post_id="P_COPY",
+                sync_channel_id=channel.id,
+                ts=1.0,
+                source_workspace_id=source.id,
+            )
+        )
+
+        helpers.purge_workspace(source.id)
+
+        kept = DbManager.find_records(schemas.PostMeta, [schemas.PostMeta.id == copy.id])
+        assert len(kept) == 1
+        assert kept[0].source_workspace_id is None
+
+    def test_new_workspace_does_not_inherit_purged_settings(self, real_db):
+        import helpers
+        from helpers.workspace_settings import get_raw_workspace_setting
+
+        workspace = DbManager.create_record(
+            schemas.Workspace(team_id="T_SET", workspace_name="Settings", instance_id=get_instance_id())
+        )
+        DbManager.create_record(
+            schemas.WorkspaceSetting(workspace_id=workspace.id, key="extra_manager_user_ids", value='["UADA"]')
+        )
+
+        helpers.purge_workspace(workspace.id)
+        created = DbManager.create_record(
+            schemas.Workspace(team_id="T_NEXT", workspace_name="Next", instance_id=get_instance_id())
+        )
+
+        assert (
+            DbManager.find_records(schemas.WorkspaceSetting, [schemas.WorkspaceSetting.workspace_id == created.id])
+            == []
+        )
+        assert get_raw_workspace_setting(created.id, "extra_manager_user_ids") is None
+
+    def test_every_workspace_foreign_key_is_purged(self):
+        """A new foreign key to workspaces.id fails until purge_workspace handles it."""
+        found: set[tuple[str, str]] = set()
+        for table in schemas.BaseClass.metadata.sorted_tables:
+            for column in table.columns:
+                for foreign_key in column.foreign_keys:
+                    if foreign_key.column.table.name == "workspaces" and foreign_key.column.name == "id":
+                        found.add((table.name, column.name))
+        assert found == {
+            ("workspace_group_members", "workspace_id"),
+            ("workspace_group_members", "invited_by_workspace_id"),
+            ("sync_channels", "workspace_id"),
+            ("post_meta", "source_workspace_id"),
+            ("user_directory", "workspace_id"),
+            ("user_mappings", "source_workspace_id"),
+            ("user_mappings", "target_workspace_id"),
+            ("workspace_settings", "workspace_id"),
+            ("federation_workspace_allowlist", "workspace_id"),
+            ("federation_pending_stubs", "workspace_id"),
+        }
