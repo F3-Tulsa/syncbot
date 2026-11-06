@@ -9,15 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- NOTICE: On MySQL and PostgreSQL, the next retention purge removes Workspaces that earlier purges could not remove
-
 ### Fixed
 
 - A request through one Workspace's install no longer renames, re-tokens, creates, or restores another Workspace
 - When SyncBot leaves a shared Channel, only the Workspace whose bot left is paused
-- Removing a Workspace after retention also removes its settings and External Connection rows, so a new Workspace does not inherit them
 
 ## [1.7.5] - 2026-11-04
 

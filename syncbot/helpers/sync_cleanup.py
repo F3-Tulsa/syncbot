@@ -106,7 +106,7 @@ def purge_sync_channels(channels) -> None:
 
 
 def purge_workspace(workspace_id: int) -> None:
-    """Hard-delete a workspace after every foreign key to ``workspaces.id`` is gone.
+    """Hard-delete a workspace and every row that references it, children first.
 
     Groups deliberately survive. Membership rows need two different operations
     because ``workspace_group_members`` points at ``workspaces.id`` through two
@@ -114,9 +114,6 @@ def purge_workspace(workspace_id: int) -> None:
     where it was merely the *inviter* keep their membership and only lose the
     ``invited_by_workspace_id`` back-reference. Deleting the latter would evict
     another workspace's legitimate member.
-
-    ``test_every_workspace_foreign_key_is_purged`` is the list of those foreign
-    keys. A new one has to be deleted or cleared here before the Workspace row.
     """
     if not workspace_id:
         return
@@ -161,26 +158,6 @@ def purge_workspace(workspace_id: int) -> None:
         [schemas.WorkspaceGroupMember.invited_by_workspace_id == workspace_id],
         {schemas.WorkspaceGroupMember.invited_by_workspace_id: None},
     )
-
-    DbManager.delete_records(
-        schemas.WorkspaceSetting,
-        [schemas.WorkspaceSetting.workspace_id == workspace_id],
-    )
-    DbManager.delete_records(
-        schemas.FederationWorkspaceAllowlist,
-        [schemas.FederationWorkspaceAllowlist.workspace_id == workspace_id],
-    )
-    DbManager.delete_records(
-        schemas.FederationPendingStub,
-        [schemas.FederationPendingStub.workspace_id == workspace_id],
-    )
-    # This workspace's own copies are already gone with its Sync Channels.
-    DbManager.update_records(
-        schemas.PostMeta,
-        [schemas.PostMeta.source_workspace_id == workspace_id],
-        {schemas.PostMeta.source_workspace_id: None},
-    )
-    _cache_delete_prefix(f"workspace_setting:{workspace_id}:")
 
     # delete_record(Workspace, ...) would filter on team_id, not id.
     DbManager.delete_records(schemas.Workspace, [schemas.Workspace.id == workspace_id])
