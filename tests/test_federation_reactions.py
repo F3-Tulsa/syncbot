@@ -89,6 +89,7 @@ class TestFederationMessageInbound:
             blocks=None,
             thread_ts=None,
             reply_broadcast=False,
+            post_id="p1",
         )
 
 

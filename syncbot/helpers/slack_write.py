@@ -242,6 +242,7 @@ def _post_target_text(
     remote_workspace_label: str | None,
     team_id: str | None,
     as_user: str | None,
+    post_id: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Post a target message that has no file."""
     post_kwargs: dict[str, Any] = {
@@ -251,6 +252,7 @@ def _post_target_text(
         "blocks": target_blocks or None,
         "thread_ts": thread_ts,
         "reply_broadcast": reply_broadcast,
+        "post_id": post_id,
     }
     if customize:
         post_kwargs["user_name"] = name_for_target
@@ -415,6 +417,7 @@ def slack_write_create(
             remote_workspace_label=remote_workspace_label,
             team_id=workspace.team_id,
             as_user=as_user,
+            post_id=post_id,
         )
 
     def _fail_create(exc: Exception) -> tuple[None, None]:
