@@ -254,6 +254,15 @@ CONFIG_BACKUP_DOWNLOAD = "backup_download"
 CONFIG_BACKUP_RESTORE_JSON_INPUT = "backup_restore_json_input"
 """Input: uploaded JSON file in Backup/Restore modal."""
 
+CONFIG_DATA_TOOLS = "data_tools"
+"""Action: user clicked "Data Tools" on the Home tab (opens modal)."""
+
+CONFIG_DATA_TOOLS_SUBMIT = "data_tools_submit"
+"""Callback: Data Tools modal submitted."""
+
+CONFIG_DATA_TOOLS_OPTION = "data_tools_option"
+"""Input: radio for Repair (Dry Run), Repair, or Purge Soft-Deleted Data."""
+
 CONFIG_DATA_MIGRATION = "data_migration"
 """Action: user clicked "Data Migration" in SyncBot Configuration (opens modal)."""
 

@@ -333,6 +333,12 @@ def _build_configuration_section(
                     action=actions.CONFIG_BACKUP_RESTORE,
                 ),
             )
+            config_buttons.append(
+                orm.ButtonElement(
+                    label=":toolbox: Data Tools",
+                    action=actions.CONFIG_DATA_TOOLS,
+                ),
+            )
         config_buttons.append(
             orm.ButtonElement(
                 label=":package: Data Migration",

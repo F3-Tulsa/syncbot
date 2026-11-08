@@ -48,6 +48,7 @@ from helpers.core import (
     is_workspace_manager,
     safe_get,
 )
+from helpers.data_repair import RepairReport, run_repair
 from helpers.encryption import decrypt_bot_token, encrypt_bot_token
 from helpers.envelope import (
     ACTION_ADD,
@@ -363,6 +364,8 @@ __all__ = [
     "get_bot_token",
     "get_workspace_record",
     "workspace_has_connection_rows",
+    "run_repair",
+    "RepairReport",
     "is_request_for_team",
     "is_backup_visible_for_workspace",
     "is_settings_visible_for_workspace",

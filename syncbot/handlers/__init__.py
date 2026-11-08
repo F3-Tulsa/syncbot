@@ -32,6 +32,11 @@ from handlers.channel_sync import (
     handle_resume_sync,
     handle_resume_sync_confirm,
 )
+from handlers.data_tools import (
+    handle_data_tools,
+    handle_data_tools_submit_ack,
+    handle_data_tools_submit_work,
+)
 from handlers.export_import import (
     handle_backup_download,
     handle_backup_restore,
@@ -134,6 +139,9 @@ __all__ = [
     "handle_backup_restore_submit_ack",
     "handle_backup_restore_submit_work",
     "handle_data_migration",
+    "handle_data_tools",
+    "handle_data_tools_submit_ack",
+    "handle_data_tools_submit_work",
     "handle_data_migration_export",
     "handle_data_migration_review",
     "handle_data_migration_review_ack",
