@@ -158,7 +158,12 @@ from helpers.slack_api import (
     update_modal,
 )
 from helpers.slack_write import slack_write_create, slack_write_delete, slack_write_edit
-from helpers.sync_cleanup import purge_sync, purge_sync_channels, purge_workspace
+from helpers.sync_cleanup import (
+    purge_sync,
+    purge_sync_channels,
+    purge_workspace,
+    workspace_has_connection_rows,
+)
 from helpers.sync_participation import (
     already_subscribed_to_source,
     channel_publishes,
@@ -357,6 +362,7 @@ __all__ = [
     "get_workspace_by_id",
     "get_bot_token",
     "get_workspace_record",
+    "workspace_has_connection_rows",
     "is_request_for_team",
     "is_backup_visible_for_workspace",
     "is_settings_visible_for_workspace",

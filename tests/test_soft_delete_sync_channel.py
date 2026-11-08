@@ -1005,3 +1005,27 @@ class TestRetentionPurge:
         assert "Data Retention Days: 30" in text
         assert "permanently removed" not in text
         assert "Workspaces in Sync" in text
+
+    def test_a_workspace_on_an_allowlist_is_kept_and_not_announced(self, real_db):
+        from datetime import timedelta
+
+        from federation.core import get_instance_id, get_or_create_instance_keypair
+
+        get_or_create_instance_keypair()
+        workspace = _workspace()
+        DbManager.create_record(
+            schemas.FederationWorkspaceAllowlist(instance_id=get_instance_id(), workspace_id=workspace.id)
+        )
+        DbManager.update_records(
+            schemas.Workspace,
+            [schemas.Workspace.id == workspace.id],
+            {schemas.Workspace.deleted_at: datetime.now(UTC) - timedelta(days=40)},
+        )
+        with patch("helpers.notifications.notify_admins_dm") as dm:
+            from helpers.notifications import purge_soft_deletes
+
+            result = purge_soft_deletes(30)
+        dm.assert_not_called()
+        assert result.workspaces_kept == 1
+        assert result.workspaces_purged == 0
+        assert DbManager.get_record(schemas.Workspace, id=workspace.team_id) is not None

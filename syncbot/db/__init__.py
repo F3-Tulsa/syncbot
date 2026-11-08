@@ -48,6 +48,7 @@ _register_sqlite3_datetime_adapters()
 
 GLOBAL_ENGINE = None
 GLOBAL_SESSION = None
+_SQLITE_FOREIGN_KEYS_ENFORCED = True
 GLOBAL_SCHEMA = None
 
 # Maximum number of times to retry a DB operation on a transient connection error
@@ -282,6 +283,52 @@ def _init_failure_message(exc: BaseException) -> str:
     )
 
 
+def _listen_sqlite_foreign_keys(engine) -> None:
+    """Turn SQLite foreign keys on for each new connection, unless startup found bad rows."""
+    from sqlalchemy import event
+
+    def _on_connect(dbapi_connection, _connection_record):
+        if not isinstance(dbapi_connection, sqlite3.Connection):
+            return
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON" if _SQLITE_FOREIGN_KEYS_ENFORCED else "PRAGMA foreign_keys=OFF")
+        finally:
+            cursor.close()
+
+    event.listen(engine, "connect", _on_connect)
+
+
+def _review_sqlite_foreign_keys() -> None:
+    """Keep enforcement off for this process when non-federation rows fail the check."""
+    global _SQLITE_FOREIGN_KEYS_ENFORCED
+
+    _SQLITE_FOREIGN_KEYS_ENFORCED = True
+    if constants.get_database_backend() != "sqlite" or GLOBAL_ENGINE is None:
+        return
+    with GLOBAL_ENGINE.connect() as conn:
+        rows = conn.execute(text("PRAGMA foreign_key_check")).fetchall()
+    federation = 0
+    other: dict[str, int] = {}
+    for row in rows:
+        table = row[0]
+        parent = row[2] if len(row) > 2 else ""
+        federation_row = (
+            str(table).startswith("federation_")
+            or table == "instances"
+            or (table == "workspaces" and parent == "instances")
+        )
+        if federation_row:
+            federation += 1
+        else:
+            other[table] = other.get(table, 0) + 1
+    if federation:
+        log_warning("sqlite_foreign_key_federation_rows", count=federation)
+    if other:
+        log_error("sqlite_foreign_key_violations", tables=other)
+        _SQLITE_FOREIGN_KEYS_ENFORCED = False
+
+
 def initialize_database() -> None:
     """Apply Alembic migrations. Does not ``CREATE DATABASE``.
 
@@ -291,6 +338,7 @@ def initialize_database() -> None:
     for attempt in range(1, _DB_INIT_MAX_ATTEMPTS + 1):
         try:
             _run_alembic_upgrade()
+            _review_sqlite_foreign_keys()
             return
         except Exception as exc:
             retryable = _is_retryable_db_error(exc)
@@ -348,6 +396,8 @@ def drop_and_init_db() -> None:
         poolclass=pool.NullPool if constants.get_database_backend() == "sqlite" else pool.QueuePool,
         pool_pre_ping=_is_network_sql_backend(),
     )
+    if constants.get_database_backend() == "sqlite":
+        _listen_sqlite_foreign_keys(engine)
 
     _drop_all_tables_dialect_aware(engine)
 
@@ -386,6 +436,7 @@ def get_engine(echo: bool = False, schema: str = None):
             poolclass=pool.NullPool,
             connect_args=connect_args,
         )
+        _listen_sqlite_foreign_keys(GLOBAL_ENGINE)
     else:
         GLOBAL_ENGINE = create_engine(
             db_url,
