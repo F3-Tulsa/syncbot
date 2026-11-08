@@ -147,7 +147,7 @@ def _run(workspace, payload):
     return dm.call_args.args[2], pushed
 
 
-def test_import_from_unknown_install_brings_this_workspace_only(real_db):
+def test_import_from_unknown_instance_brings_this_workspace_only(real_db):
     from db import DbManager, schemas
     from federation.core import get_instance_id
 
@@ -186,7 +186,7 @@ def test_import_from_unknown_install_brings_this_workspace_only(real_db):
     assert "Secret Install" not in text
 
 
-def test_import_from_unknown_install_cannot_join_an_existing_group(real_db):
+def test_import_from_unknown_instance_cannot_join_an_existing_group(real_db):
     from db import DbManager, schemas
     from federation.core import get_instance_id
 
@@ -268,6 +268,83 @@ def test_second_workspace_imports_after_joining(real_db):
     assert by_channel["CA"].sync_id == by_channel["CB"].sync_id
     posts = DbManager.find_records(schemas.PostMeta, [schemas.PostMeta.post_id == "P1"])
     assert {row.sync_channel_id for row in posts} == {by_channel["CA"].id, by_channel["CB"].id}
+
+
+def _peer(instance_id, public_pem, *, status, trust):
+    from db import DbManager, schemas
+
+    return DbManager.create_record(
+        schemas.Instance(
+            instance_id=instance_id,
+            public_key=public_pem,
+            status=status,
+            trust_status=trust,
+            name="Partner Org",
+            created_at=_now(),
+        )
+    )
+
+
+def _assert_only_this_workspace(workspace_a):
+    from db import DbManager, schemas
+
+    channels = DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.id.isnot(None)])
+    assert [row.channel_id for row in channels] == ["CA"]
+    assert DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.channel_id == "CB"]) == []
+
+
+def test_import_from_unknown_instance_writes_no_federation_rows(real_db):
+    from sqlalchemy import text
+
+    from db import get_engine
+    from federation.core import get_instance_id
+
+    workspace_a = _workspace("T0000000A", "Workspace A", get_instance_id())
+    payload, _instance_id, _pem = _sign(_file())
+
+    def snapshot():
+        with get_engine().connect() as conn:
+            tables = [
+                row[0]
+                for row in conn.execute(
+                    text(
+                        "SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND (name = 'instances' OR name LIKE 'federation_%') ORDER BY name"
+                    )
+                )
+            ]
+            stored = {table: conn.execute(text(f"SELECT * FROM {table}")).fetchall() for table in tables}
+            teams = conn.execute(text("SELECT team_id FROM workspaces ORDER BY team_id")).fetchall()
+        return stored, teams
+
+    before = snapshot()
+    _run(workspace_a, payload)
+    after = snapshot()
+    assert before[0] == after[0]
+    assert after[1] == [("T0000000A",)]
+
+
+def test_import_from_disconnected_instance_is_accepted(real_db):
+    from federation.core import get_instance_id
+
+    workspace_a = _workspace("T0000000A", "Workspace A", get_instance_id())
+    payload, instance_id, public_pem = _sign(_file())
+    _peer(instance_id, public_pem, status="inactive", trust="trusted")
+    _text, pushed = _run(workspace_a, payload)
+    _assert_only_this_workspace(workspace_a)
+    pushed.assert_not_called()
+
+
+def test_import_with_federation_off_is_accepted(real_db):
+    from federation.core import get_instance_id
+
+    workspace_a = _workspace("T0000000A", "Workspace A", get_instance_id())
+    payload, instance_id, public_pem = _sign(_file())
+    _peer(instance_id, public_pem, status="active", trust="trusted")
+    with patch("helpers.settings.federation_enabled", return_value=False):
+        _text, pushed = _run(workspace_a, payload)
+    _assert_only_this_workspace(workspace_a)
+    pushed.assert_not_called()
 
 
 def test_review_names_the_signer_by_fingerprint(real_db):

@@ -232,6 +232,158 @@ def test_federation_tables_are_untouched(real_db):
         assert conn.execute(text("SELECT workspace_id FROM federation_pending_stubs")).scalar() == 424242
 
 
+def test_every_foreign_key_is_clean_after_upgrade(real_db):
+    from db import DbManager, get_engine, schemas
+    from federation.core import get_instance_id
+
+    workspace = _workspace("T0000000A", "Workspace A")
+    group = DbManager.create_record(
+        schemas.WorkspaceGroup(name="Group", invite_code="GRP-FK", status="active", created_at=_now(), uid="g-fk")
+    )
+    sync = DbManager.create_record(schemas.Sync(title="general", sync_mode="group", group_id=group.id, uid="s-fk"))
+    channel = _channel(sync, workspace, "CA")
+    now = _now()
+    with get_engine().begin() as conn:
+        conn.execute(text("PRAGMA foreign_keys=OFF"))
+        conn.execute(
+            text(
+                "INSERT INTO workspaces (team_id, workspace_name, instance_id) VALUES ('T_DANGLING', 'Dangle', 'missing-instance')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO workspace_group_members (group_id, workspace_id, status, role) VALUES (999991, :ws, 'active', 'member')"
+            ),
+            {"ws": workspace.id},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO workspace_group_members (group_id, workspace_id, status, role) VALUES (:gid, 424242, 'active', 'member')"
+            ),
+            {"gid": group.id},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO workspace_group_members
+                    (group_id, workspace_id, status, role, invited_by_workspace_id)
+                VALUES (:gid, :ws, 'active', 'member', 424242)
+                """
+            ),
+            {"gid": group.id, "ws": workspace.id},
+        )
+        conn.execute(
+            text("INSERT INTO syncs (title, sync_mode, group_id, uid) VALUES ('gone', 'group', 999992, 's-gone')")
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO sync_channels
+                    (sync_id, workspace_id, channel_id, status, publishes, subscribes, created_at)
+                VALUES (999993, :ws, 'CORPHAN', 'active', 1, 1, :now)
+                """
+            ),
+            {"ws": workspace.id, "now": now},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO sync_channels
+                    (sync_id, workspace_id, channel_id, status, publishes, subscribes, created_at)
+                VALUES (:sid, 424242, 'CGONE', 'active', 1, 1, :now)
+                """
+            ),
+            {"sid": sync.id, "now": now},
+        )
+        conn.execute(
+            text("INSERT INTO post_meta (post_id, sync_channel_id, ts, kind) VALUES ('PORPHAN', 999994, 1, 'message')")
+        )
+        conn.execute(
+            text(
+                "INSERT INTO post_meta (post_id, sync_channel_id, ts, kind, source_workspace_id) VALUES ('PSOURCE', :cid, 1, 'message', 424242)"
+            ),
+            {"cid": channel.id},
+        )
+        conn.execute(
+            text("INSERT INTO user_directory (workspace_id, slack_user_id, updated_at) VALUES (424242, 'UDIR', :now)"),
+            {"now": now},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO user_mappings
+                    (source_workspace_id, source_user_id, target_workspace_id, map_method, mapped_at)
+                VALUES (424242, 'USRC', :ws, 'none', :now)
+                """
+            ),
+            {"ws": workspace.id, "now": now},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO user_mappings
+                    (source_workspace_id, source_user_id, target_workspace_id, map_method, mapped_at)
+                VALUES (:ws, 'UTGT', 424243, 'none', :now)
+                """
+            ),
+            {"ws": workspace.id, "now": now},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO user_mappings
+                    (source_workspace_id, source_user_id, target_workspace_id, map_method, mapped_at, group_id)
+                VALUES (:ws, 'UGRP', :ws, 'none', :now, 999995)
+                """
+            ),
+            {"ws": workspace.id, "now": now},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO workspace_settings (workspace_id, key, value) VALUES (424242, 'allow_private_channels', 'no')"
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO federation_pairing_requests
+                    (subject_team_id, requested_by_user_id, requested_at, status, pairing_code_id)
+                VALUES ('T0000000A', 'U1', :now, 'pending', 999996)
+                """
+            ),
+            {"now": now},
+        )
+        conn.execute(
+            text("INSERT INTO federation_pending_stubs (instance_id, workspace_id) VALUES (:iid, 424242)"),
+            {"iid": get_instance_id()},
+        )
+        conn.execute(
+            text("INSERT INTO federation_pending_stubs (instance_id, workspace_id) VALUES ('missing-peer', :ws)"),
+            {"ws": workspace.id},
+        )
+        conn.execute(
+            text("INSERT INTO federation_workspace_allowlist (instance_id, workspace_id) VALUES (:iid, 424242)"),
+            {"iid": get_instance_id()},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO federation_workspace_allowlist (instance_id, workspace_id) VALUES ('missing-peer-allow', :ws)"
+            ),
+            {"ws": workspace.id},
+        )
+    _stamp_021()
+    _upgrade()
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("PRAGMA foreign_key_check")).fetchall()
+    for row in rows:
+        table = row[0]
+        parent = row[2]
+        assert (
+            table.startswith("federation_") or table == "instances" or (table == "workspaces" and parent == "instances")
+        )
+    assert any(row[0] == "workspaces" and row[2] == "instances" for row in rows)
+
+
 def test_deleted_sync_id_is_not_reused(real_db):
     from db import DbManager, schemas
     from federation.core import get_instance_id
