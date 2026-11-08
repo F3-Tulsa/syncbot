@@ -108,7 +108,10 @@ class Workspace(BaseClass, GetDBClass):
     """
 
     __tablename__ = "workspaces"
-    __table_args__ = (Index("ix_workspaces_instance_id", "instance_id"),)
+    __table_args__ = (
+        Index("ix_workspaces_instance_id", "instance_id"),
+        {"sqlite_autoincrement": True},
+    )
     id = Column(Integer, primary_key=True)
     team_id = Column(String(32), unique=True)
     workspace_name = Column(String(100))
@@ -124,6 +127,7 @@ class WorkspaceGroup(BaseClass, GetDBClass):
     """A named group of workspaces that can sync channels together."""
 
     __tablename__ = "workspace_groups"
+    __table_args__ = ({"sqlite_autoincrement": True},)
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
     invite_code = Column(String(20), unique=True, nullable=False)
@@ -181,7 +185,10 @@ class WorkspaceGroupMember(BaseClass, GetDBClass):
 
 class Sync(BaseClass, GetDBClass):
     __tablename__ = "syncs"
-    __table_args__ = (Index("ix_syncs_group_id", "group_id"),)
+    __table_args__ = (
+        Index("ix_syncs_group_id", "group_id"),
+        {"sqlite_autoincrement": True},
+    )
     id = Column(Integer, primary_key=True)
     title = Column(String(100))
     description = Column(String(100))
@@ -199,6 +206,7 @@ class SyncChannel(BaseClass, GetDBClass):
         Index("ix_sync_channels_channel_id", "channel_id"),
         Index("ix_sync_channels_sync_id", "sync_id"),
         Index("ix_sync_channels_workspace_id", "workspace_id"),
+        {"sqlite_autoincrement": True},
     )
     id = Column(Integer, primary_key=True)
     sync_id = Column(Integer, ForeignKey("syncs.id"))
