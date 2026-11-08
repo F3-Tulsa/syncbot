@@ -913,12 +913,17 @@ def _import_finished_text(
             f":white_check_mark: Import finished. SyncBot is already uninstalled from this Workspace "
             f"on `{source_name}`, so its Syncs are running."
         )
+    elif result == "resumed" and source_kind in _STANDALONE_KINDS:
+        text = (
+            ":white_check_mark: Import finished. This Workspace's Syncs are running. "
+            "Other Workspaces in the file were left out; invite them to the Groups here."
+        )
     else:
         text = ":white_check_mark: Import finished. This Workspace's Syncs are running."
     team_id = getattr(workspace, "team_id", "") or ""
     workspace_id = getattr(workspace, "id", None)
     missing = _migration_workspace_names_not_here(data, team_id)
-    if missing:
+    if missing and source_kind not in _STANDALONE_KINDS:
         text += " " + _missing_workspaces_text(missing, finished=True)
     if workspace_id is not None:
         left_out = _migration_groups_not_joined(data, workspace_id)
@@ -941,7 +946,7 @@ def handle_data_migration_submit_ack(
         return None
 
     kind, signer = ei.get_migration_file_status(data)
-    if kind not in ("this_install", "connected"):
+    if kind not in _IMPORTABLE_KINDS:
         source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else {}
         name = ei.format_migration_source_name(str(source.get("instance_id") or ""), signer)
         return {
@@ -960,6 +965,7 @@ def handle_data_migration_submit_ack(
             "workspace_id": workspace_record.id,
             "team_id_to_workspace_id": team_id_to_workspace_id,
             "source_name": source_name,
+            "source_kind": kind,
         },
         ttl=600,
     )
@@ -973,11 +979,19 @@ def handle_data_migration_submit_ack(
                 "a connected SyncBot instance."
             )
         )
+    elif kind in _STANDALONE_KINDS:
+        blocks.append(
+            section(
+                f":package: This file was signed by `{source_name}`, which is not connected here. "
+                "SyncBot checked that it has not been changed, but cannot check where it came from. "
+                "Only import a file you exported."
+            )
+        )
     else:
         blocks.append(section(":package: This file was exported from this Workspace on this SyncBot instance."))
     blocks.extend(_migration_overview_blocks(data))
     missing = _migration_workspace_names_not_here(data, workspace_record.team_id)
-    if missing:
+    if missing and kind not in _STANDALONE_KINDS:
         blocks.append(section(_missing_workspaces_text(missing)))
     left_out = _migration_groups_not_joined(data, workspace_record.id)
     if left_out:
@@ -990,6 +1004,14 @@ def handle_data_migration_submit_ack(
                 f"Until SyncBot is uninstalled from this Workspace on `{source_name}`, "
                 "these Syncs show `Waiting for migration`. "
                 "If it is already uninstalled there, they start right away."
+            )
+        )
+    elif kind in _STANDALONE_KINDS:
+        blocks.append(
+            section(
+                "Importing brings over this Workspace's Groups, Syncs, Channels, and message history. "
+                "Other Workspaces in the file are left out. They can join the Groups here with an invite code. "
+                "Uninstall SyncBot from this Workspace on the other install first, or every message posts twice."
             )
         )
     else:
@@ -1013,6 +1035,16 @@ def handle_data_migration_submit_ack(
 
 _IMPORT_FAIL_TEXT = ":warning: Import failed. Try the import again."
 _IMPORT_EXPIRED_TEXT = ":warning: That import expired. Try the import again."
+_STANDALONE_KINDS = frozenset({"unknown", "not_connected", "federation_off"})
+_IMPORTABLE_KINDS = frozenset({"this_install", "connected"}) | _STANDALONE_KINDS
+
+
+def _this_workspace_only_map(workspace_record) -> dict:
+    """Map only the Workspace that is importing. Other teams in the file stay out."""
+    team_id = getattr(workspace_record, "team_id", None)
+    if not team_id:
+        return {}
+    return {team_id: workspace_record.id}
 
 
 def _migration_refused_text(kind: str, name: str) -> str:
@@ -1026,33 +1058,7 @@ def _migration_refused_text(kind: str, name: str) -> str:
             "SyncBot cannot check this file. Export it again from this instance or from a connected instance. "
             "A file from before 1.7.3 needs a new export."
         )
-    if kind == "federation_off":
-        return (
-            f"This file is from `{name}`, and Federation is off. "
-            "A primary Workspace admin can turn it on in Settings."
-        )
-    if kind == "not_connected":
-        return (
-            f"This file is from `{name}`, and that connection is not active. "
-            "A primary Workspace admin can set up the External Connection again, then import this file again."
-        )
-    return (
-        f"SyncBot does not know the instance that signed this file (`{name}`). "
-        "If it came from a SyncBot instance you trust, a primary Workspace admin can connect the two instances "
-        "under External Connections, then import it again."
-    )
-
-
-def _migration_stopped_text(kind: str, name: str) -> str:
-    if kind == "federation_off":
-        return (
-            ":warning: Import stopped. Federation is off. "
-            "A primary Workspace admin can turn it on in Settings, then import this file again."
-        )
-    return (
-        f":warning: Import stopped. `{name}` is no longer connected here. "
-        "A primary Workspace admin can connect it again under External Connections, then import this file again."
-    )
+    return "SyncBot will not import this file."
 
 
 def handle_data_migration_review_ack(body: dict, client: WebClient, context: dict) -> dict | None:
@@ -1113,17 +1119,19 @@ def _complete_data_migration_import(
         _notify_import_result(client, body, user_id, _IMPORT_FAIL_TEXT)
         return
     kind, signer = ei.get_migration_file_status(data)
-    if kind not in ("this_install", "connected"):
+    if kind not in _IMPORTABLE_KINDS:
         source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else {}
         instance_id = str(source.get("instance_id") or "")
         if signer is not None:
             name = ei.format_migration_source_name(instance_id, signer)
         else:
             name = meta.get("source_name") or ei.format_migration_source_name(instance_id, None)
-        _notify_import_result(client, body, user_id, _migration_stopped_text(kind, name))
+        _notify_import_result(client, body, user_id, ":warning: Import stopped. " + _migration_refused_text(kind, name))
         return
     if kind == "connected":
         team_id_to_workspace_id = _narrow_import_map(team_id_to_workspace_id, workspace_record, signer)
+    elif kind in _STANDALONE_KINDS:
+        team_id_to_workspace_id = _this_workspace_only_map(workspace_record)
     source_name = (
         ei.format_migration_source_name(getattr(signer, "instance_id", "") or "", signer)
         if signer is not None
@@ -1140,8 +1148,11 @@ def _complete_data_migration_import(
             context=context,
         )
         result, peer = "resumed", None
-        if getattr(workspace_record, "team_id", None):
-            result, peer = helpers.consider_migration_release(workspace_record.team_id)
+        team_id = getattr(workspace_record, "team_id", None)
+        if kind in _STANDALONE_KINDS and team_id:
+            helpers.restore_migrated_workspace(team_id)
+        elif team_id:
+            result, peer = helpers.consider_migration_release(team_id)
         builders.refresh_home_tab_for_workspace(
             workspace_record,
             logger,
