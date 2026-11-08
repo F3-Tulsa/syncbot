@@ -155,18 +155,29 @@ def test_each_option_shows_its_results():
     assert text == "Nothing to purge."
 
 
-def test_failed_view_update_sends_the_dm():
+def test_results_are_shown_and_sent_by_dm():
     client = MagicMock()
-    client.views_update.side_effect = RuntimeError("closed")
     with (
         _allow(),
         patch("handlers.data_tools.run_repair") as repair,
-        patch("handlers.data_tools.helpers.notify_user_dm") as dm,
+        patch("handlers._common.helpers.notify_user_dm") as dm,
     ):
         repair.return_value.count.return_value = 0
         handle_data_tools_submit_work(_body(), client, MagicMock(), {})
+    client.views_update.assert_called_once()
+    text = client.views_update.call_args.kwargs["view"]["blocks"][0]["text"]["text"]
+    assert text == "No problems found."
     dm.assert_called_once()
     assert dm.call_args.args[2] == "No problems found."
+
+
+def test_purge_description_fits_slack():
+    for days in (1, 365):
+        with patch("handlers.data_tools.soft_delete_retention_days", return_value=days):
+            view = build_data_tools_view()
+        text = view["blocks"][2]["element"]["options"][2]["description"]["text"]
+        assert text == f"Remove uninstalled Workspaces and left Channels now, not in {days} days."
+        assert len(text) <= 75
 
 
 def test_purge_now_ignores_the_retention_window(real_db):

@@ -10,7 +10,6 @@ unset. A soft-deleted channel may keep a membership whose ``deleted_at`` is
 set. Syncs with no group are left alone. Federation tables are not written.
 """
 
-import logging
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -37,7 +36,6 @@ def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     tables = set(inspector.get_table_names())
-    counts: dict[str, int] = {}
 
     if "syncs" in tables and "workspace_groups" in tables:
         sync_ids = [
@@ -52,7 +50,6 @@ def upgrade() -> None:
                 )
             )
         ]
-        counts["sync_missing_group"] = len(sync_ids)
         if sync_ids and "sync_channels" in tables:
             _delete_channels_for_syncs(bind, tables, sync_ids)
             bind.execute(
@@ -78,7 +75,6 @@ def upgrade() -> None:
                 )
             )
         ]
-        counts["channels_removed"] = len(channel_ids)
         if channel_ids:
             if "post_meta" in tables:
                 bind.execute(
@@ -93,7 +89,7 @@ def upgrade() -> None:
             )
 
     if "post_meta" in tables and "sync_channels" in tables:
-        result = bind.execute(
+        bind.execute(
             sa.text(
                 """
                 DELETE FROM post_meta
@@ -102,10 +98,8 @@ def upgrade() -> None:
                 """
             )
         )
-        counts["post_meta_missing_channel"] = result.rowcount or 0
 
     if "workspaces" in tables:
-        counts["rows_missing_workspace"] = 0
         for table, column in (
             ("workspace_settings", "workspace_id"),
             ("user_directory", "workspace_id"),
@@ -113,7 +107,7 @@ def upgrade() -> None:
         ):
             if table not in tables:
                 continue
-            result = bind.execute(
+            bind.execute(
                 sa.text(
                     f"""
                     DELETE FROM {table}
@@ -122,9 +116,8 @@ def upgrade() -> None:
                     """
                 )
             )
-            counts["rows_missing_workspace"] += result.rowcount or 0
         if "user_mappings" in tables:
-            result = bind.execute(
+            bind.execute(
                 sa.text(
                     """
                     DELETE FROM user_mappings
@@ -133,10 +126,9 @@ def upgrade() -> None:
                     """
                 )
             )
-            counts["rows_missing_workspace"] += result.rowcount or 0
 
     if "post_meta" in tables and "workspaces" in tables:
-        result = bind.execute(
+        bind.execute(
             sa.text(
                 """
                 UPDATE post_meta
@@ -146,9 +138,8 @@ def upgrade() -> None:
                 """
             )
         )
-        counts["source_workspace_cleared"] = result.rowcount or 0
     if "workspace_group_members" in tables and "workspaces" in tables:
-        result = bind.execute(
+        bind.execute(
             sa.text(
                 """
                 UPDATE workspace_group_members
@@ -158,9 +149,8 @@ def upgrade() -> None:
                 """
             )
         )
-        counts["invited_by_cleared"] = result.rowcount or 0
     if "user_mappings" in tables and "workspace_groups" in tables:
-        result = bind.execute(
+        bind.execute(
             sa.text(
                 """
                 UPDATE user_mappings
@@ -170,10 +160,9 @@ def upgrade() -> None:
                 """
             )
         )
-        counts["mapping_group_cleared"] = result.rowcount or 0
 
     if "workspace_group_members" in tables and "workspace_groups" in tables:
-        result = bind.execute(
+        bind.execute(
             sa.text(
                 """
                 DELETE FROM workspace_group_members
@@ -181,10 +170,6 @@ def upgrade() -> None:
                 """
             )
         )
-        counts["members_missing_group"] = result.rowcount or 0
-
-    counts["federation_dangling"] = _count_federation_dangling(bind, tables)
-    logging.getLogger("syncbot").info("data_consistency_cleanup %s", counts)
 
     if bind.dialect.name == "sqlite":
         for name in ("workspaces", "workspace_groups", "syncs", "sync_channels"):
@@ -215,43 +200,3 @@ def _delete_channels_for_syncs(bind, tables: set[str], sync_ids: list[int]) -> N
         sa.text("DELETE FROM sync_channels WHERE sync_id IN :ids").bindparams(sa.bindparam("ids", expanding=True)),
         {"ids": sync_ids},
     )
-
-
-def _count_federation_dangling(bind, tables: set[str]) -> int:
-    total = 0
-    checks = (
-        (
-            "workspaces",
-            "instance_id",
-            "instances",
-            "instance_id",
-        ),
-        (
-            "federation_workspace_allowlist",
-            "workspace_id",
-            "workspaces",
-            "id",
-        ),
-        (
-            "federation_pending_stubs",
-            "workspace_id",
-            "workspaces",
-            "id",
-        ),
-    )
-    for table, column, parent, parent_column in checks:
-        if table not in tables or parent not in tables:
-            continue
-        total += (
-            bind.execute(
-                sa.text(
-                    f"""
-                    SELECT COUNT(*) FROM {table}
-                    WHERE {column} IS NOT NULL
-                      AND {column} NOT IN (SELECT {parent_column} FROM {parent})
-                    """
-                )
-            ).scalar()
-            or 0
-        )
-    return int(total)

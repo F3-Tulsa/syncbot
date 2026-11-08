@@ -48,8 +48,8 @@ _register_sqlite3_datetime_adapters()
 
 GLOBAL_ENGINE = None
 GLOBAL_SESSION = None
-_SQLITE_FOREIGN_KEYS_ENFORCED = True
 GLOBAL_SCHEMA = None
+_SQLITE_FOREIGN_KEYS_ENFORCED = True
 
 # Maximum number of times to retry a DB operation on a transient connection error
 _MAX_RETRIES = 2

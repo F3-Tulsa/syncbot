@@ -126,9 +126,9 @@ Import also follows these rules:
 
 ### Moving without a connection
 
-You can import a signed file from an install this one is not connected to, including when Federation is off. The file still has to be signed and unchanged. SyncBot can tell that it was not edited, and it cannot tell who signed it, so only import a file you exported.
+You can import a signed file from an instance this one is not connected to, including when Federation is off. The file still has to be signed and unchanged. SyncBot can tell that it was not edited, but it cannot tell who signed it, so only import a file you exported.
 
-That import brings over only this Workspace's Groups, Syncs, Channels, and message history. Other Workspaces in the file are left out. They join the Groups here with an invite code. When two Workspaces move, the first one imports, the second joins each Group, and then the second imports. Uninstall SyncBot from this Workspace on the old install first, or every message posts twice.
+That import brings over only this Workspace's Groups, Syncs, Channels, and message history. Other Workspaces in the file are left out. They join the Groups here with an invite code. When two Workspaces move, the first one imports, the second joins each Group, and then the second imports. Uninstall SyncBot from this Workspace on the old instance first, or every message posts twice.
 
 A file with no signature, or one that was changed after it was signed, is still refused.
 

@@ -643,6 +643,7 @@ def purge_soft_deletes(retention_days: int) -> PurgeResult:
     """
     from helpers.workspace import get_workspace_by_id
 
+    # Workspace.deleted_at is timezone-aware. SyncChannel.deleted_at is stored naive.
     cutoff = datetime.now(UTC) - timedelta(days=retention_days)
     cutoff_naive = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=retention_days)
     channels_purged, syncs_purged, groups_disbanded = _purge_expired_deleted_channels(cutoff_naive)
@@ -702,6 +703,9 @@ def purge_soft_deletes(retention_days: int) -> PurgeResult:
                     except Exception as e:
                         log_warning("purge_notify_failed", workspace_id=member.workspace_id, error=str(e))
 
+        # purge_workspace, not a bare Workspace delete: ten foreign keys across
+        # eight tables still reference this row, so a parent-first delete fails on
+        # MySQL with error 1451 and the retention purge silently stops working.
         try:
             removed = purge_workspace(ws.id)
         except Exception as e:

@@ -5,9 +5,10 @@ from logging import Logger
 from slack_sdk.web import WebClient
 
 import helpers
-from handlers._common import _wait_modal_ack
+from handlers._common import _close_modal_done, _dm_user, _get_selected_option_value, _wait_modal_ack
 from helpers._cache import _cache_delete, _cache_get, _cache_set
-from helpers.data_repair import REPAIR_CHECKS, run_repair
+from helpers.data_repair import REPAIR_CHECKS, RepairReport, run_repair
+from helpers.notifications import PurgeResult, purge_soft_deletes
 from helpers.settings import soft_delete_retention_days
 from logger import log_error
 from slack import actions, orm
@@ -29,26 +30,23 @@ def _allowed(client: WebClient, body: dict) -> bool:
     return helpers.is_backup_visible_for_workspace(team_id)
 
 
-def _purge_description(days: int) -> str:
-    planned = f"Remove uninstalled Workspaces and left Channels now, instead of after {days} days."
-    if len(planned) <= 75:
-        return planned
-    return f"Remove soft-deleted rows now, instead of after {days} days."
-
-
 def build_data_tools_view() -> dict:
     """The Data Tools form. The first option is selected."""
     days = soft_delete_retention_days()
     options = [
         orm.SelectorOption("Repair (Dry Run)", _DRY_RUN, "Find problems. Changes nothing."),
         orm.SelectorOption("Repair", _REPAIR, "Find and fix problems."),
-        orm.SelectorOption("Purge Soft-Deleted Data", _PURGE, _purge_description(days)),
+        orm.SelectorOption(
+            "Purge Soft-Deleted Data",
+            _PURGE,
+            f"Remove uninstalled Workspaces and left Channels now, not in {days} days.",
+        ),
     ]
     blocks = [
         orm.SectionBlock(
             label="Check and clean up this instance's database. Every Workspace here is affected."
         ).as_form_field(),
-        {"type": "context", "elements": [{"type": "mrkdwn", "text": "Make a backup first."}]},
+        orm.ContextBlock(element=orm.ContextElement(initial_value="Make a backup first.")).as_form_field(),
         orm.InputBlock(
             label="Choose",
             action=actions.CONFIG_DATA_TOOLS_OPTION,
@@ -97,9 +95,9 @@ def handle_data_tools_submit_ack(body: dict, client: WebClient, context: dict) -
 
 
 def handle_data_tools_submit_work(body: dict, client: WebClient, logger: Logger, context: dict) -> None:
-    """Run the chosen tool, then show the results or DM them."""
+    """Run the chosen tool, then show the results and send them by DM."""
     user_id = helpers.get_user_id_from_body(body)
-    option = _selected_option(body)
+    option = _get_selected_option_value(body, actions.CONFIG_DATA_TOOLS_OPTION)
     try:
         if not _allowed(client, body):
             return
@@ -109,10 +107,11 @@ def handle_data_tools_submit_work(body: dict, client: WebClient, logger: Logger,
         text = _FAILED_TEXT
     finally:
         _cache_delete(_RUNNING_KEY)
-    _show_or_dm(client, body, user_id, text)
+    _dm_user(client, user_id, text)
+    _close_modal_done(client, body, text)
 
 
-def format_repair_text(report, *, fixed: bool) -> str:
+def format_repair_text(report: RepairReport, *, fixed: bool) -> str:
     """Results for Repair and Repair (Dry Run). Zero counts are left out."""
     lines = [f"• {label}: {report.count(key)}" for key, label in REPAIR_CHECKS if report.count(key)]
     if not lines:
@@ -124,7 +123,7 @@ def format_repair_text(report, *, fixed: bool) -> str:
     return text
 
 
-def format_purge_text(result) -> str:
+def format_purge_text(result: PurgeResult) -> str:
     """Results for Purge Soft-Deleted Data."""
     removed = []
     if result.workspaces_purged:
@@ -145,32 +144,9 @@ def format_purge_text(result) -> str:
     return "\n".join(parts)
 
 
-def _selected_option(body: dict) -> str | None:
-    values = helpers.safe_get(body, "view", "state", "values") or {}
-    return orm.RadioButtonsElement().get_selected_value(values, actions.CONFIG_DATA_TOOLS_OPTION)
-
-
 def _run_option(option: str | None) -> str:
     if option == _REPAIR:
         return format_repair_text(run_repair(fix=True), fixed=True)
     if option == _PURGE:
-        from helpers.notifications import purge_soft_deletes
-
         return format_purge_text(purge_soft_deletes(0))
     return format_repair_text(run_repair(fix=False), fixed=False)
-
-
-def _show_or_dm(client: WebClient, body: dict, user_id: str | None, text: str) -> None:
-    view_id = helpers.safe_get(body, "view", "id")
-    view = {
-        "type": "modal",
-        "title": {"type": "plain_text", "text": "Done"},
-        "close": {"type": "plain_text", "text": "Close"},
-        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
-    }
-    try:
-        if not view_id:
-            raise RuntimeError("missing view")
-        client.views_update(view_id=view_id, view=view)
-    except Exception:
-        helpers.notify_user_dm(client, user_id, text)

@@ -1011,7 +1011,7 @@ def handle_data_migration_submit_ack(
             section(
                 "Importing brings over this Workspace's Groups, Syncs, Channels, and message history. "
                 "Other Workspaces in the file are left out. They can join the Groups here with an invite code. "
-                "Uninstall SyncBot from this Workspace on the other install first, or every message posts twice."
+                "Uninstall SyncBot from this Workspace on the other instance first, or every message posts twice."
             )
         )
     else:
@@ -1076,7 +1076,7 @@ def _notify_import_result(client: WebClient, body: dict, user_id: str | None, me
 
 
 def _narrow_import_map(team_id_to_workspace_id: dict, workspace_record, signer) -> dict:
-    """Keep this Workspace and stubs that belong to the install that signed the file."""
+    """Keep this Workspace and stubs that belong to the instance that signed the file."""
     signer_id = getattr(signer, "instance_id", None)
     this_team = getattr(workspace_record, "team_id", None)
     narrowed = {}

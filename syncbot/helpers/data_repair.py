@@ -38,7 +38,7 @@ def run_repair(*, fix: bool) -> RepairReport:
     workspaces = DbManager.find_records(schemas.Workspace, [schemas.Workspace.id.isnot(None)])
     groups = DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.id.isnot(None)])
     members = DbManager.find_records(schemas.WorkspaceGroupMember, [schemas.WorkspaceGroupMember.id.isnot(None)])
-    posts = DbManager.find_records(schemas.PostMeta, [schemas.PostMeta.id.isnot(None)])
+    post_meta_rows = DbManager.find_records(schemas.PostMeta, [schemas.PostMeta.id.isnot(None)])
 
     sync_by_id = {row.id: row for row in syncs}
     workspace_ids = {row.id for row in workspaces}
@@ -51,18 +51,19 @@ def run_repair(*, fix: bool) -> RepairReport:
     missing_sync = [row for row in channels if row.sync_id not in sync_by_id]
     in_live_sync = [row for row in channels if row.sync_id in sync_by_id and row.sync_id not in missing_group_ids]
     missing_workspace = [row for row in in_live_sync if row.workspace_id not in workspace_ids]
-    taken = {row.id for row in missing_workspace}
+    missing_workspace_channel_ids = {row.id for row in missing_workspace}
     outside = [
         row
         for row in in_live_sync
-        if row.id not in taken and _channel_outside_group(row, sync_by_id.get(row.sync_id), members)
+        if row.id not in missing_workspace_channel_ids
+        and _is_channel_outside_group(row, sync_by_id.get(row.sync_id), members)
     ]
-    doomed = {row.id for row in missing_sync} | taken | {row.id for row in outside}
-    remaining = [row for row in channels if row.id not in doomed and row.sync_id not in missing_group_ids]
-    duplicates = _duplicate_groups(remaining)
+    removed_ids = {row.id for row in missing_sync} | missing_workspace_channel_ids | {row.id for row in outside}
+    remaining = [row for row in channels if row.id not in removed_ids and row.sync_id not in missing_group_ids]
+    duplicates = _get_duplicate_channels(remaining)
 
-    orphan_posts = [row for row in posts if row.sync_channel_id not in channel_ids]
-    workspace_rows = _workspace_row_count(workspace_ids, group_ids)
+    post_meta_missing_channel = [row for row in post_meta_rows if row.sync_channel_id not in channel_ids]
+    workspace_rows = _count_workspace_rows(workspace_ids, group_ids)
 
     counts = {
         "sync_missing_group": len(missing_group),
@@ -70,7 +71,7 @@ def run_repair(*, fix: bool) -> RepairReport:
         "channel_missing_workspace": len(missing_workspace),
         "channel_outside_group": len(outside),
         "duplicate_channel": sum(len(group) - 1 for group in duplicates),
-        "post_meta_missing_channel": len(orphan_posts),
+        "post_meta_missing_channel": len(post_meta_missing_channel),
         "rows_missing_workspace": workspace_rows,
     }
     report = RepairReport(counts=counts)
@@ -83,14 +84,16 @@ def run_repair(*, fix: bool) -> RepairReport:
     purge_sync_channels(missing_sync + missing_workspace + outside)
     for group in duplicates:
         _merge_duplicate_channels(group)
-    if orphan_posts:
-        DbManager.delete_records(schemas.PostMeta, [schemas.PostMeta.id.in_([row.id for row in orphan_posts])])
+    if post_meta_missing_channel:
+        DbManager.delete_records(
+            schemas.PostMeta, [schemas.PostMeta.id.in_([row.id for row in post_meta_missing_channel])]
+        )
     _fix_workspace_rows(workspace_ids, group_ids)
     _invalidate_after_repair()
     return report
 
 
-def _channel_outside_group(channel, sync, members) -> bool:
+def _is_channel_outside_group(channel, sync, members) -> bool:
     """True when the channel's Sync has a Group and this Workspace is not an active member."""
     if sync is None or getattr(sync, "group_id", None) is None:
         return False
@@ -106,7 +109,8 @@ def _channel_outside_group(channel, sync, members) -> bool:
     return channel.deleted_at is None and all(member.deleted_at is not None for member in matches)
 
 
-def _duplicate_groups(channels) -> list[list]:
+def _get_duplicate_channels(channels) -> list[list]:
+    """One list per set of Channels that share a Sync, Workspace, and Channel id."""
     grouped: dict[tuple, list] = {}
     for channel in channels:
         key = (channel.sync_id, channel.workspace_id, channel.channel_id)
@@ -117,12 +121,12 @@ def _duplicate_groups(channels) -> list[list]:
 def _merge_duplicate_channels(group) -> None:
     """Keep the oldest live row and move the others' message records onto it."""
     live = [channel for channel in group if channel.deleted_at is None]
-    pool = live or list(group)
-    keeper = min(pool, key=lambda channel: (channel.created_at or datetime.max, channel.id))
-    others = [channel for channel in group if channel.id != keeper.id]
+    candidates = live or list(group)
+    kept_channel = min(candidates, key=lambda channel: (channel.created_at or datetime.max, channel.id))
+    others = [channel for channel in group if channel.id != kept_channel.id]
     kept = {
         (row.post_id, row.ts)
-        for row in DbManager.find_records(schemas.PostMeta, [schemas.PostMeta.sync_channel_id == keeper.id])
+        for row in DbManager.find_records(schemas.PostMeta, [schemas.PostMeta.sync_channel_id == kept_channel.id])
     }
     for other in others:
         metas = DbManager.find_records(schemas.PostMeta, [schemas.PostMeta.sync_channel_id == other.id])
@@ -133,36 +137,36 @@ def _merge_duplicate_channels(group) -> None:
             DbManager.update_records(
                 schemas.PostMeta,
                 [schemas.PostMeta.id == meta.id],
-                {schemas.PostMeta.sync_channel_id: keeper.id},
+                {schemas.PostMeta.sync_channel_id: kept_channel.id},
             )
             kept.add(key)
     purge_sync_channels(others)
 
 
-def _workspace_row_count(workspace_ids: set[int], group_ids: set[int]) -> int:
+def _count_workspace_rows(workspace_ids: set[int], group_ids: set[int]) -> int:
     return (
-        len(_settings_missing(workspace_ids))
-        + len(_directory_missing(workspace_ids))
-        + len(_mappings_missing(workspace_ids))
-        + len(_members_missing_workspace(workspace_ids))
-        + len(_posts_missing_source(workspace_ids))
-        + len(_members_missing_inviter(workspace_ids))
-        + len(_mappings_missing_group(group_ids, workspace_ids))
-        + len(_members_missing_group(group_ids, workspace_ids))
+        len(_get_settings_missing_workspace(workspace_ids))
+        + len(_get_directory_missing_workspace(workspace_ids))
+        + len(_get_mappings_missing_workspace(workspace_ids))
+        + len(_get_members_missing_workspace(workspace_ids))
+        + len(_get_post_meta_missing_source(workspace_ids))
+        + len(_get_members_missing_inviter(workspace_ids))
+        + len(_get_mappings_missing_group(group_ids, workspace_ids))
+        + len(_get_members_missing_group(group_ids, workspace_ids))
     )
 
 
-def _settings_missing(workspace_ids: set[int]):
+def _get_settings_missing_workspace(workspace_ids: set[int]):
     rows = DbManager.find_records(schemas.WorkspaceSetting, [schemas.WorkspaceSetting.workspace_id.isnot(None)])
     return [row for row in rows if row.workspace_id not in workspace_ids]
 
 
-def _directory_missing(workspace_ids: set[int]):
+def _get_directory_missing_workspace(workspace_ids: set[int]):
     rows = DbManager.find_records(schemas.UserDirectory, [schemas.UserDirectory.id.isnot(None)])
     return [row for row in rows if row.workspace_id not in workspace_ids]
 
 
-def _mappings_missing(workspace_ids: set[int]):
+def _get_mappings_missing_workspace(workspace_ids: set[int]):
     rows = DbManager.find_records(schemas.UserMapping, [schemas.UserMapping.id.isnot(None)])
     return [
         row
@@ -171,71 +175,71 @@ def _mappings_missing(workspace_ids: set[int]):
     ]
 
 
-def _members_missing_workspace(workspace_ids: set[int]):
+def _get_members_missing_workspace(workspace_ids: set[int]):
     rows = DbManager.find_records(schemas.WorkspaceGroupMember, [schemas.WorkspaceGroupMember.id.isnot(None)])
     return [row for row in rows if row.workspace_id not in workspace_ids]
 
 
-def _posts_missing_source(workspace_ids: set[int]):
+def _get_post_meta_missing_source(workspace_ids: set[int]):
     rows = DbManager.find_records(schemas.PostMeta, [schemas.PostMeta.source_workspace_id.isnot(None)])
     return [row for row in rows if row.source_workspace_id not in workspace_ids]
 
 
-def _members_missing_inviter(workspace_ids: set[int]):
+def _get_members_missing_inviter(workspace_ids: set[int]):
     rows = DbManager.find_records(
         schemas.WorkspaceGroupMember, [schemas.WorkspaceGroupMember.invited_by_workspace_id.isnot(None)]
     )
-    doomed = {row.id for row in _members_missing_workspace(workspace_ids)}
-    return [row for row in rows if row.id not in doomed and row.invited_by_workspace_id not in workspace_ids]
+    removed_ids = {row.id for row in _get_members_missing_workspace(workspace_ids)}
+    return [row for row in rows if row.id not in removed_ids and row.invited_by_workspace_id not in workspace_ids]
 
 
-def _mappings_missing_group(group_ids: set[int], workspace_ids: set[int]):
+def _get_mappings_missing_group(group_ids: set[int], workspace_ids: set[int]):
     rows = DbManager.find_records(schemas.UserMapping, [schemas.UserMapping.group_id.isnot(None)])
-    doomed = {row.id for row in _mappings_missing(workspace_ids)}
-    return [row for row in rows if row.id not in doomed and row.group_id not in group_ids]
+    removed_ids = {row.id for row in _get_mappings_missing_workspace(workspace_ids)}
+    return [row for row in rows if row.id not in removed_ids and row.group_id not in group_ids]
 
 
-def _members_missing_group(group_ids: set[int], workspace_ids: set[int]):
+def _get_members_missing_group(group_ids: set[int], workspace_ids: set[int]):
     rows = DbManager.find_records(schemas.WorkspaceGroupMember, [schemas.WorkspaceGroupMember.id.isnot(None)])
-    doomed = {row.id for row in _members_missing_workspace(workspace_ids)}
-    return [row for row in rows if row.id not in doomed and row.group_id not in group_ids]
+    removed_ids = {row.id for row in _get_members_missing_workspace(workspace_ids)}
+    return [row for row in rows if row.id not in removed_ids and row.group_id not in group_ids]
 
 
 def _fix_workspace_rows(workspace_ids: set[int], group_ids: set[int]) -> None:
-    setting_ids = sorted({row.workspace_id for row in _settings_missing(workspace_ids)})
+    setting_ids = sorted({row.workspace_id for row in _get_settings_missing_workspace(workspace_ids)})
     if setting_ids:
         DbManager.delete_records(schemas.WorkspaceSetting, [schemas.WorkspaceSetting.workspace_id.in_(setting_ids)])
-    directory_ids = [row.id for row in _directory_missing(workspace_ids)]
+    directory_ids = [row.id for row in _get_directory_missing_workspace(workspace_ids)]
     if directory_ids:
         DbManager.delete_records(schemas.UserDirectory, [schemas.UserDirectory.id.in_(directory_ids)])
-    mapping_ids = [row.id for row in _mappings_missing(workspace_ids)]
+    mapping_ids = [row.id for row in _get_mappings_missing_workspace(workspace_ids)]
     if mapping_ids:
         DbManager.delete_records(schemas.UserMapping, [schemas.UserMapping.id.in_(mapping_ids)])
-    member_ids = [row.id for row in _members_missing_workspace(workspace_ids)]
+    member_ids = [row.id for row in _get_members_missing_workspace(workspace_ids)]
     if member_ids:
         DbManager.delete_records(schemas.WorkspaceGroupMember, [schemas.WorkspaceGroupMember.id.in_(member_ids)])
-    post_ids = [row.id for row in _posts_missing_source(workspace_ids)]
+    post_ids = [row.id for row in _get_post_meta_missing_source(workspace_ids)]
     if post_ids:
         DbManager.update_records(
             schemas.PostMeta,
             [schemas.PostMeta.id.in_(post_ids)],
             {schemas.PostMeta.source_workspace_id: None},
         )
-    inviter_ids = [row.id for row in _members_missing_inviter(workspace_ids)]
+    inviter_ids = [row.id for row in _get_members_missing_inviter(workspace_ids)]
     if inviter_ids:
         DbManager.update_records(
             schemas.WorkspaceGroupMember,
             [schemas.WorkspaceGroupMember.id.in_(inviter_ids)],
             {schemas.WorkspaceGroupMember.invited_by_workspace_id: None},
         )
-    group_mapping_ids = [row.id for row in _mappings_missing_group(group_ids, workspace_ids)]
+    group_mapping_ids = [row.id for row in _get_mappings_missing_group(group_ids, workspace_ids)]
     if group_mapping_ids:
         DbManager.update_records(
             schemas.UserMapping,
             [schemas.UserMapping.id.in_(group_mapping_ids)],
             {schemas.UserMapping.group_id: None},
         )
-    group_member_ids = [row.id for row in _members_missing_group(group_ids, workspace_ids)]
+    group_member_ids = [row.id for row in _get_members_missing_group(group_ids, workspace_ids)]
     if group_member_ids:
         DbManager.delete_records(schemas.WorkspaceGroupMember, [schemas.WorkspaceGroupMember.id.in_(group_member_ids)])
 
