@@ -183,6 +183,7 @@ def format_action_notice(
     label_for: dict[int, str] | None = None,
     workspace_line: bool = False,
     app_name: str | None = None,
+    details: list[str] | None = None,
 ) -> str:
     """The Channel post, or the acting Workspace's manager DM when *for_managers* is set.
 
@@ -219,6 +220,8 @@ def format_action_notice(
     else:
         roster = format_workspaces_in_sync(sync_id, label_for=label_for).replace("`", "")
         lines.append(f"Workspaces in Sync: {roster}")
+    for detail in details or []:
+        lines.append(str(detail).replace("`", "'"))
     if for_managers and history_deleted:
         lines.append("History: Deleted")
     elif for_managers and retention_days is not None:

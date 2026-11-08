@@ -50,10 +50,10 @@ def real_db(tmp_path):
             db_mod._SQLITE_FOREIGN_KEYS_ENFORCED = old_fk
 
 
-def _body(option="dry_run"):
+def _body(option="verify", team_id="TPRIMARY"):
     return {
         "user": {"id": "U1"},
-        "team_id": "TPRIMARY",
+        "team_id": team_id,
         "trigger_id": "trig",
         "view": {
             "id": "V1",
@@ -107,16 +107,48 @@ def test_modal_is_hidden_for_a_non_admin_and_a_non_primary_workspace():
     client.views_update.assert_not_called()
 
 
+def _radio(view):
+    return next(block["element"] for block in view["blocks"] if block.get("type") == "input")
+
+
+def _notice_patches(workspace=None):
+    record = workspace or MagicMock(workspace_name="Workspace A")
+    return patch.multiple(
+        "handlers.data_tools.helpers",
+        format_admin_label=MagicMock(return_value="`Ada Lovelace (Workspace A)`"),
+        get_workspace_record=MagicMock(return_value=record),
+    )
+
+
+def test_modal_explainer_is_one_section():
+    view = build_data_tools_view()
+    sections = [block for block in view["blocks"] if block.get("type") == "section"]
+    assert len(sections) == 1
+    assert sections[0]["text"]["text"] == (
+        "Verify and repair the SyncBot database. Every Workspace is affected. Make a backup first!"
+    )
+    assert all(block.get("type") != "context" for block in view["blocks"])
+    assert view["blocks"][0]["type"] == "section"
+    assert view["blocks"][1]["type"] == "input"
+
+
 def test_modal_offers_three_options():
-    with patch("handlers.data_tools.soft_delete_retention_days", return_value=30):
-        view = build_data_tools_view()
-    radio = view["blocks"][2]["element"]
-    labels = [option["text"]["text"] for option in radio["options"]]
-    assert labels == ["Repair (Dry Run)", "Repair", "Purge Soft-Deleted Data"]
-    assert radio["initial_option"]["value"] == "dry_run"
-    assert "30" in radio["options"][2]["description"]["text"]
+    view = build_data_tools_view()
+    radio = _radio(view)
+    options = radio["options"]
+    assert [(option["text"]["text"], option["value"], option["description"]["text"]) for option in options] == [
+        ("Verify", "verify", "Check database consistency."),
+        ("Repair", "repair", "Fix database issues."),
+        ("Purge Soft-Deleted Data", "purge", "Remove soft-deleted data immediately."),
+    ]
+    assert radio["initial_option"]["value"] == "verify"
     assert view["title"]["text"] == "Data Tools"
     assert view["submit"]["text"] == "Run"
+
+
+def test_purge_description_fits_slack():
+    for option in _radio(build_data_tools_view())["options"]:
+        assert len(option["description"]["text"]) < 75
 
 
 def test_run_while_running_returns_the_error():
@@ -125,59 +157,202 @@ def test_run_while_running_returns_the_error():
     assert "already running" in result["errors"]["data_tools_option"]
 
 
-def test_each_option_shows_its_results():
+def test_run_shows_the_running_text():
+    labels = {
+        "verify": "Verify",
+        "repair": "Repair",
+        "purge": "Purge Soft-Deleted Data",
+        "other": "Verify",
+    }
+    for option, label in labels.items():
+        with (
+            _allow(),
+            patch("handlers.data_tools._cache_get", return_value=None),
+            patch("handlers.data_tools._cache_set"),
+        ):
+            ack = handle_data_tools_submit_ack(_body(option), MagicMock(), {})
+        assert (
+            ack["view"]["blocks"][0]["text"]["text"] == f"{label} is running. Close this and SyncBot will DM a report."
+        )
+        assert ack["view"]["title"]["text"] == "Data Tools"
+
+
+def _dm_text():
+    return patch("handlers._common.helpers.notify_user_dm")
+
+
+def test_work_does_not_update_the_view():
     client = MagicMock()
     with (
         _allow(),
-        patch("handlers.data_tools._cache_get", return_value=None),
-        patch("handlers.data_tools._cache_set"),
+        _notice_patches(),
         patch("handlers.data_tools.run_repair") as repair,
-    ):
-        repair.return_value.count.return_value = 0
-        ack = handle_data_tools_submit_ack(_body("dry_run"), client, {})
-        assert "Running." in ack["view"]["blocks"][0]["text"]["text"]
-        handle_data_tools_submit_work(_body("dry_run"), client, MagicMock(), {})
-    text = client.views_update.call_args.kwargs["view"]["blocks"][0]["text"]["text"]
-    assert text == "No problems found."
-
-    client = MagicMock()
-    with _allow(), patch("handlers.data_tools.run_repair") as repair:
-        repair.return_value.count.side_effect = lambda key: 3 if key == "channel_outside_group" else 0
-        handle_data_tools_submit_work(_body("repair"), client, MagicMock(), {})
-    text = client.views_update.call_args.kwargs["view"]["blocks"][0]["text"]["text"]
-    assert text.startswith("*Fixed*")
-    assert "Channels from a Workspace outside the Group: 3" in text
-
-    client = MagicMock()
-    with _allow(), patch("handlers.data_tools._run_option", return_value="Nothing to purge."):
-        handle_data_tools_submit_work(_body("purge"), client, MagicMock(), {})
-    text = client.views_update.call_args.kwargs["view"]["blocks"][0]["text"]["text"]
-    assert text == "Nothing to purge."
-
-
-def test_results_are_shown_and_sent_by_dm():
-    client = MagicMock()
-    with (
-        _allow(),
-        patch("handlers.data_tools.run_repair") as repair,
-        patch("handlers._common.helpers.notify_user_dm") as dm,
+        _dm_text(),
     ):
         repair.return_value.count.return_value = 0
         handle_data_tools_submit_work(_body(), client, MagicMock(), {})
-    client.views_update.assert_called_once()
-    text = client.views_update.call_args.kwargs["view"]["blocks"][0]["text"]["text"]
-    assert text == "No problems found."
+    client.views_update.assert_not_called()
+
+
+def test_verify_reports_every_check_when_nothing_is_found():
+    client = MagicMock()
+    with (
+        _allow(),
+        _notice_patches(),
+        patch("handlers.data_tools.run_repair") as repair,
+        _dm_text() as dm,
+    ):
+        repair.return_value.count.return_value = 0
+        handle_data_tools_submit_work(_body("verify"), client, MagicMock(), {})
     dm.assert_called_once()
-    assert dm.call_args.args[2] == "No problems found."
+    text = dm.call_args.args[2]
+    for label in (
+        "Syncs whose Group is gone: 0",
+        "Channels in a Sync that is gone: 0",
+        "Channels from a Workspace that is gone: 0",
+        "Channels from a Workspace outside the Group: 0",
+        "Duplicate Channels in one Sync: 0",
+        "Message records with no Channel: 0",
+        "Rows for a Workspace that is gone: 0",
+    ):
+        assert label in text
+    assert "Result: No issues found. Nothing was changed." in text
 
 
-def test_purge_description_fits_slack():
-    for days in (1, 365):
-        with patch("handlers.data_tools.soft_delete_retention_days", return_value=days):
-            view = build_data_tools_view()
-        text = view["blocks"][2]["element"]["options"][2]["description"]["text"]
-        assert text == f"Remove uninstalled Workspaces and left Channels now, not in {days} days."
-        assert len(text) <= 75
+def test_report_is_an_action_notice():
+    client = MagicMock()
+    with (
+        _allow(),
+        _notice_patches(),
+        patch("handlers.data_tools.run_repair") as repair,
+        _dm_text() as dm,
+    ):
+        repair.return_value.count.return_value = 0
+        handle_data_tools_submit_work(_body(), client, MagicMock(), {})
+    text = dm.call_args.args[2]
+    assert "*SyncBot Action Notice*" in text
+    inside = text.split("```", 2)[1]
+    assert "Acting Manager:" in inside
+    assert "Action: Verify" in inside
+    assert "Workspace: Workspace A" in inside
+
+
+def _outside_channel():
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    group = DbManager.create_record(
+        schemas.WorkspaceGroup(name="Group", invite_code="GRP-TOOLS", status="active", created_at=now, uid="g-tools")
+    )
+    workspace = DbManager.create_record(
+        schemas.Workspace(team_id="T0000000A", workspace_name="Workspace A", instance_id=get_instance_id())
+    )
+    other = DbManager.create_record(
+        schemas.Workspace(team_id="T0000000C", workspace_name="Workspace C", instance_id=get_instance_id())
+    )
+    DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=workspace.id,
+            status="active",
+            role="member",
+            joined_at=now,
+        )
+    )
+    sync = DbManager.create_record(schemas.Sync(title="general", sync_mode="group", group_id=group.id, uid="s-tools"))
+    channel = DbManager.create_record(
+        schemas.SyncChannel(
+            sync_id=sync.id,
+            workspace_id=other.id,
+            channel_id="CC",
+            status="active",
+            publishes=True,
+            subscribes=True,
+            created_at=now,
+        )
+    )
+    return workspace, channel
+
+
+def test_verify_reports_issues_and_changes_nothing(real_db):
+    from db import DbManager, schemas
+
+    workspace, channel = _outside_channel()
+    with _allow(), _notice_patches(workspace), _dm_text() as dm:
+        handle_data_tools_submit_work(_body("verify", team_id=workspace.team_id), MagicMock(), MagicMock(), {})
+    assert DbManager.get_record(schemas.SyncChannel, id=channel.id) is not None
+    text = dm.call_args.args[2]
+    assert "Channels from a Workspace outside the Group: 1" in text
+    assert "Nothing was changed" in text
+    assert "Result: 1 issue found. Nothing was changed. Run Repair to fix it." in text
+
+
+def test_repair_reports_what_it_fixed(real_db):
+    from db import DbManager, schemas
+
+    workspace, channel = _outside_channel()
+    with _allow(), _notice_patches(workspace), _dm_text() as dm:
+        handle_data_tools_submit_work(_body("repair", team_id=workspace.team_id), MagicMock(), MagicMock(), {})
+    assert DbManager.get_record(schemas.SyncChannel, id=channel.id) is None
+    text = dm.call_args.args[2]
+    assert "Channels from a Workspace outside the Group: 1" in text
+    assert "Result: Fixed 1 issue." in text
+
+
+def test_purge_reports_nothing_to_purge(real_db):
+    with _allow(), _notice_patches(), _dm_text() as dm:
+        handle_data_tools_submit_work(_body("purge"), MagicMock(), MagicMock(), {})
+    assert "Result: Nothing to purge. Nothing was changed." in dm.call_args.args[2]
+    assert "Workspaces Removed: 0" in dm.call_args.args[2]
+    assert "Workspaces Kept: 0" in dm.call_args.args[2]
+
+
+def test_purge_reports_a_kept_workspace(real_db):
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+
+    workspace = DbManager.create_record(
+        schemas.Workspace(team_id="T0000000A", workspace_name="Workspace A", instance_id=get_instance_id())
+    )
+    DbManager.update_records(
+        schemas.Workspace,
+        [schemas.Workspace.id == workspace.id],
+        {schemas.Workspace.deleted_at: datetime.now(UTC) - timedelta(days=1)},
+    )
+    DbManager.create_record(
+        schemas.FederationWorkspaceAllowlist(instance_id=get_instance_id(), workspace_id=workspace.id)
+    )
+    with (
+        _allow(),
+        _notice_patches(workspace),
+        patch("helpers.notifications.notify_admins_dm"),
+        _dm_text() as dm,
+    ):
+        handle_data_tools_submit_work(_body("purge", team_id=workspace.team_id), MagicMock(), MagicMock(), {})
+    text = dm.call_args.args[2]
+    assert "Workspaces Kept: 1" in text
+    assert "Result: 1 Workspace is still on an External Connection, so it was kept. Nothing was changed." in text
+    assert DbManager.get_record(schemas.Workspace, id=workspace.team_id) is not None
+
+
+def test_failure_sends_a_notice():
+    from helpers._cache import _cache_get, _cache_set
+
+    _cache_set("data_tools_running", True, ttl=900)
+    with (
+        _allow(),
+        _notice_patches(),
+        patch("handlers.data_tools.run_repair", side_effect=RuntimeError("boom")),
+        _dm_text() as dm,
+    ):
+        handle_data_tools_submit_work(_body("repair"), MagicMock(), MagicMock(), {})
+    dm.assert_called_once()
+    text = dm.call_args.args[2]
+    assert "*SyncBot Action Notice*" in text
+    assert "Action: Repair" in text
+    assert "Result: Something went wrong. Nothing more was changed. Check the logs." in text
+    assert _cache_get("data_tools_running") is None
 
 
 def test_purge_now_ignores_the_retention_window(real_db):
@@ -208,12 +383,16 @@ def test_purge_now_ignores_the_retention_window(real_db):
         )
     )
     client = MagicMock()
-    with _allow(), patch("helpers.notifications.notify_admins_dm"):
-        handle_data_tools_submit_work(_body("purge"), client, MagicMock(), {})
+    with (
+        _allow(),
+        _notice_patches(workspace),
+        patch("helpers.notifications.notify_admins_dm"),
+        _dm_text(),
+    ):
+        handle_data_tools_submit_work(_body("purge", team_id=workspace.team_id), client, MagicMock(), {})
     assert DbManager.get_record(schemas.SyncChannel, id=old.id) is None
     assert DbManager.get_record(schemas.SyncChannel, id=live.id) is not None
-    text = client.views_update.call_args.kwargs["view"]["blocks"][0]["text"]["text"]
-    assert "Channels: 1" in text
+    client.views_update.assert_not_called()
 
 
 def test_purge_now_keeps_a_workspace_on_an_allowlist(real_db):
@@ -234,12 +413,16 @@ def test_purge_now_keeps_a_workspace_on_an_allowlist(real_db):
         schemas.FederationWorkspaceAllowlist(instance_id=get_instance_id(), workspace_id=workspace.id)
     )
     client = MagicMock()
-    with _allow(), patch("helpers.notifications.notify_admins_dm") as dm:
-        handle_data_tools_submit_work(_body("purge"), client, MagicMock(), {})
+    with (
+        _allow(),
+        _notice_patches(workspace),
+        patch("helpers.notifications.notify_admins_dm") as dm,
+        _dm_text(),
+    ):
+        handle_data_tools_submit_work(_body("purge", team_id=workspace.team_id), client, MagicMock(), {})
     dm.assert_not_called()
     assert DbManager.get_record(schemas.Workspace, id=workspace.team_id) is not None
-    text = client.views_update.call_args.kwargs["view"]["blocks"][0]["text"]["text"]
-    assert "Kept: 1 Workspaces still on an External Connection." in text
+    client.views_update.assert_not_called()
 
 
 def test_purge_now_omits_a_day_count():

@@ -261,7 +261,7 @@ CONFIG_DATA_TOOLS_SUBMIT = "data_tools_submit"
 """Callback: Data Tools modal submitted."""
 
 CONFIG_DATA_TOOLS_OPTION = "data_tools_option"
-"""Input: radio for Repair (Dry Run), Repair, or Purge Soft-Deleted Data."""
+"""Input: radio for Verify, Repair, or Purge Soft-Deleted Data."""
 
 CONFIG_DATA_MIGRATION = "data_migration"
 """Action: user clicked "Data Migration" in SyncBot Configuration (opens modal)."""

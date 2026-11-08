@@ -5,21 +5,22 @@ from logging import Logger
 from slack_sdk.web import WebClient
 
 import helpers
-from handlers._common import _close_modal_done, _dm_user, _get_selected_option_value, _wait_modal_ack
+from handlers._common import _dm_user, _get_selected_option_value, _wait_modal_ack
 from helpers._cache import _cache_delete, _cache_get, _cache_set
 from helpers.data_repair import REPAIR_CHECKS, RepairReport, run_repair
 from helpers.notifications import PurgeResult, purge_soft_deletes
-from helpers.settings import soft_delete_retention_days
 from logger import log_error
 from slack import actions, orm
 
 _RUNNING_KEY = "data_tools_running"
 _RUNNING_TTL = 900
-_DRY_RUN = "dry_run"
-_REPAIR = "repair"
-_PURGE = "purge"
-_WAIT_TEXT = "Running. This usually takes under a minute. If you close this, the results come by DM."
-_FAILED_TEXT = "Something went wrong. Nothing more was changed. Try again, or check the logs."
+_OPTIONS = (
+    ("verify", "Verify", "Check database consistency."),
+    ("repair", "Repair", "Fix database issues."),
+    ("purge", "Purge Soft-Deleted Data", "Remove soft-deleted data immediately."),
+)
+_VERIFY, _REPAIR, _PURGE = (row[0] for row in _OPTIONS)
+_FAILURE_LINE = "Result: Something went wrong. Nothing more was changed. Check the logs."
 
 
 def _allowed(client: WebClient, body: dict) -> bool:
@@ -30,28 +31,25 @@ def _allowed(client: WebClient, body: dict) -> bool:
     return helpers.is_backup_visible_for_workspace(team_id)
 
 
+def _option_label(value: str | None) -> str:
+    for option_value, label, _description in _OPTIONS:
+        if option_value == value:
+            return label
+    return "Verify"
+
+
 def build_data_tools_view() -> dict:
     """The Data Tools form. The first option is selected."""
-    days = soft_delete_retention_days()
-    options = [
-        orm.SelectorOption("Repair (Dry Run)", _DRY_RUN, "Find problems. Changes nothing."),
-        orm.SelectorOption("Repair", _REPAIR, "Find and fix problems."),
-        orm.SelectorOption(
-            "Purge Soft-Deleted Data",
-            _PURGE,
-            f"Remove uninstalled Workspaces and left Channels now, not in {days} days.",
-        ),
-    ]
+    options = [orm.SelectorOption(label, value, description) for value, label, description in _OPTIONS]
     blocks = [
         orm.SectionBlock(
-            label="Check and clean up this instance's database. Every Workspace here is affected."
+            label="Verify and repair the SyncBot database. Every Workspace is affected. Make a backup first!"
         ).as_form_field(),
-        orm.ContextBlock(element=orm.ContextElement(initial_value="Make a backup first.")).as_form_field(),
         orm.InputBlock(
             label="Choose",
             action=actions.CONFIG_DATA_TOOLS_OPTION,
             optional=False,
-            element=orm.RadioButtonsElement(initial_value=_DRY_RUN, options=options),
+            element=orm.RadioButtonsElement(initial_value=_VERIFY, options=options),
         ).as_form_field(),
     ]
     return {
@@ -86,67 +84,120 @@ def handle_data_tools_submit_ack(body: dict, client: WebClient, context: dict) -
             },
         }
     _cache_set(_RUNNING_KEY, True, ttl=_RUNNING_TTL)
+    label = _option_label(_get_selected_option_value(body, actions.CONFIG_DATA_TOOLS_OPTION))
     return _wait_modal_ack(
         title="Data Tools",
         callback_id=actions.CONFIG_DATA_TOOLS_SUBMIT,
         dm=True,
-        text=_WAIT_TEXT,
+        text=f"{label} is running. Close this and SyncBot will DM a report.",
     )
 
 
 def handle_data_tools_submit_work(body: dict, client: WebClient, logger: Logger, context: dict) -> None:
-    """Run the chosen tool, then show the results and send them by DM."""
+    """Run the chosen tool, then DM the report. The wait view stays up."""
     user_id = helpers.get_user_id_from_body(body)
     option = _get_selected_option_value(body, actions.CONFIG_DATA_TOOLS_OPTION)
+    label = _option_label(option)
+    workspace_name = "Workspace"
+    manager = None
     try:
         if not _allowed(client, body):
             return
-        text = _run_option(option)
+        workspace_name, manager = _notice_identity(client, user_id, body, context)
+        text = _format_data_tools_notice(
+            action=label,
+            workspace_name=workspace_name,
+            manager=manager,
+            details=_run_option(option),
+        )
     except Exception:
         log_error("data_tools_failed", option=option, exc_info=True)
-        text = _FAILED_TEXT
+        text = _format_data_tools_notice(
+            action=label,
+            workspace_name=workspace_name,
+            manager=manager,
+            details=[_FAILURE_LINE],
+        )
     finally:
         _cache_delete(_RUNNING_KEY)
     _dm_user(client, user_id, text)
-    _close_modal_done(client, body, text)
 
 
-def format_repair_text(report: RepairReport, *, fixed: bool) -> str:
-    """Results for Repair and Repair (Dry Run). Zero counts are left out."""
-    lines = [f"• {label}: {report.count(key)}" for key, label in REPAIR_CHECKS if report.count(key)]
-    if not lines:
-        return "No problems found."
-    header = "Fixed" if fixed else "Found"
-    text = f"*{header}*\n" + "\n".join(lines)
-    if not fixed:
-        text += "\nRun Repair to fix these."
-    return text
+def _notice_identity(client: WebClient, user_id: str | None, body: dict, context: dict) -> tuple[str, str | None]:
+    team_id = helpers.get_team_id_from_body(body)
+    workspace = helpers.get_workspace_record(team_id, body, context, client) if team_id else None
+    name = (getattr(workspace, "workspace_name", None) or "").strip() or "Workspace"
+    manager = helpers.format_admin_label(client, user_id, workspace) if user_id else None
+    return name, manager
 
 
-def format_purge_text(result: PurgeResult) -> str:
-    """Results for Purge Soft-Deleted Data."""
-    removed = []
-    if result.workspaces_purged:
-        removed.append(f"• Workspaces: {result.workspaces_purged}")
-    if result.channels_purged:
-        removed.append(f"• Channels: {result.channels_purged}")
-    if result.syncs_purged:
-        removed.append(f"• Syncs: {result.syncs_purged}")
-    if result.groups_disbanded:
-        removed.append(f"• Groups: {result.groups_disbanded}")
-    parts = []
-    if removed:
-        parts.append("*Removed*\n" + "\n".join(removed))
-    if result.workspaces_kept:
-        parts.append(f"Kept: {result.workspaces_kept} Workspaces still on an External Connection.")
-    if not parts:
-        return "Nothing to purge."
-    return "\n".join(parts)
+def _format_data_tools_notice(*, action: str, workspace_name: str, manager: str | None, details: list[str]) -> str:
+    return helpers.format_action_notice(
+        action=action,
+        workspace_name=workspace_name,
+        manager=manager,
+        for_managers=True,
+        workspace_line=True,
+        details=details,
+    )
 
 
-def _run_option(option: str | None) -> str:
+def _format_verify_lines(report: RepairReport) -> list[str]:
+    lines = [f"{label}: {report.count(key)}" for key, label in REPAIR_CHECKS]
+    found = sum(report.count(key) for key, _label in REPAIR_CHECKS)
+    if found == 0:
+        lines.append("Result: No issues found. Nothing was changed.")
+    elif found == 1:
+        lines.append("Result: 1 issue found. Nothing was changed. Run Repair to fix it.")
+    else:
+        lines.append(f"Result: {found} issues found. Nothing was changed. Run Repair to fix them.")
+    return lines
+
+
+def _format_repair_lines(report: RepairReport) -> list[str]:
+    lines = [f"{label}: {report.count(key)}" for key, label in REPAIR_CHECKS]
+    fixed = sum(report.count(key) for key, _label in REPAIR_CHECKS)
+    if fixed == 0:
+        lines.append("Result: No issues found. Nothing was changed.")
+    elif fixed == 1:
+        lines.append("Result: Fixed 1 issue.")
+    else:
+        lines.append(f"Result: Fixed {fixed} issues.")
+    return lines
+
+
+def _kept_sentence(kept: int) -> str:
+    if kept == 1:
+        return "1 Workspace is still on an External Connection, so it was kept."
+    return f"{kept} Workspaces are still on an External Connection, so they were kept."
+
+
+def _format_purge_lines(result: PurgeResult) -> list[str]:
+    lines = [
+        f"Workspaces Removed: {result.workspaces_purged}",
+        f"Channels Removed: {result.channels_purged}",
+        f"Syncs Removed: {result.syncs_purged}",
+        f"Groups Disbanded: {result.groups_disbanded}",
+        f"Workspaces Kept: {result.workspaces_kept}",
+    ]
+    removed = result.workspaces_purged + result.channels_purged + result.syncs_purged + result.groups_disbanded
+    kept = result.workspaces_kept
+    row_word = "row" if removed == 1 else "rows"
+    removed_sentence = f"Removed {removed} {row_word}."
+    if removed == 0 and kept == 0:
+        lines.append("Result: Nothing to purge. Nothing was changed.")
+    elif removed == 0:
+        lines.append(f"Result: {_kept_sentence(kept)} Nothing was changed.")
+    elif kept == 0:
+        lines.append(f"Result: {removed_sentence}")
+    else:
+        lines.append(f"Result: {removed_sentence} {_kept_sentence(kept)}")
+    return lines
+
+
+def _run_option(option: str | None) -> list[str]:
     if option == _REPAIR:
-        return format_repair_text(run_repair(fix=True), fixed=True)
+        return _format_repair_lines(run_repair(fix=True))
     if option == _PURGE:
-        return format_purge_text(purge_soft_deletes(0))
-    return format_repair_text(run_repair(fix=False), fixed=False)
+        return _format_purge_lines(purge_soft_deletes(0))
+    return _format_verify_lines(run_repair(fix=False))

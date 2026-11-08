@@ -43,9 +43,11 @@ The button is hidden unless whoever runs your SyncBot deployment sets `ENABLE_DB
 
 Data Tools is on the primary Workspace's Home tab, for a Slack admin there. It checks this instance's database. Every Workspace on the instance is affected, so download a backup first.
 
-- **Repair (Dry Run)** finds leftover rows and changes nothing.
-- **Repair** finds those rows and fixes them.
-- **Purge Soft-Deleted Data** removes uninstalled Workspaces and left Channels now, instead of waiting for the retention period.
+- **Verify** checks the database and changes nothing.
+- **Repair** fixes what Verify finds.
+- **Purge Soft-Deleted Data** removes soft-deleted data now, instead of waiting for the retention period.
+
+Every run sends a report by DM, even when nothing was found.
 
 ## Move a Workspace
 

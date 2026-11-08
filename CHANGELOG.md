@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Data Tools on the primary Workspace: Repair (Dry Run), Repair, and Purge Soft-Deleted Data
+- Data Tools on the primary Workspace: Verify, Repair, and Purge Soft-Deleted Data
 - Data Migration import accepts a signed file from an instance that is not connected, for this Workspace only
 - Synced posts carry their post id as Slack message metadata
 
