@@ -39,6 +39,14 @@ Use restore on a new or empty instance, for example after a rebuild.
 
 The button is hidden unless whoever runs your SyncBot deployment sets `ENABLE_DB_RESET=true`. Even then, it shows only on the primary Workspace's Home tab.
 
+## Data Tools
+
+Data Tools is on the primary Workspace's Home tab, for a Slack admin there. It checks this instance's database. Every Workspace on the instance is affected, so download a backup first.
+
+- **Repair (Dry Run)** finds leftover rows and changes nothing.
+- **Repair** finds those rows and fixes them.
+- **Purge Soft-Deleted Data** removes uninstalled Workspaces and left Channels now, instead of waiting for the retention period.
+
 ## Move a Workspace
 
 Moving a Workspace to another SyncBot instance keeps its Groups, Syncs, and history. In the steps below, Workspace A moves from its previous SyncBot instance to this one. The previous instance does not go away. It keeps running its other Workspaces, and once step 5 connects the two instances, each one shows on the other's Home tab as an **External Connection**. In this example, that connection is named `Partner Org`.
@@ -104,8 +112,6 @@ If the file came from this same instance, for example to put back a Workspace yo
 
 - **The file was changed.** Export a fresh copy from the instance that made it.
 - **The file cannot be checked.** It usually came from a version before 1.7.3. Update that instance, export again, and import the new file.
-- **The file came from an instance this one is not connected to, or that External Connection is not active.** Connect the two instances (step 5), then import the same file.
-- **Federation is off.** A primary Workspace admin turns it on in **Settings**, then you import again.
 - **A Workspace in the file is not on this instance yet.** Its Channels are left out. Import the file again once it is here.
 - **A Group is already here without Workspace A.** Import does not add Workspace A to a Group it is not already in. Ask an Owner of that Group to invite Workspace A, then import again. Sharing Workspace A on both sides in step 5 usually prevents this.
 - **SyncBot could not reach the previous instance.** The Syncs keep waiting. Try the import again in a few minutes.
@@ -117,6 +123,14 @@ Import also follows these rules:
 - A Group that is new to this instance starts with just Workspace A. Its other members show up as the two instances catch up.
 - Other Workspaces on this instance are not touched.
 - People are matched up only when one is in Workspace A and the other is on a connected instance.
+
+### Moving without a connection
+
+You can import a signed file from an install this one is not connected to, including when Federation is off. The file still has to be signed and unchanged. SyncBot can tell that it was not edited, and it cannot tell who signed it, so only import a file you exported.
+
+That import brings over only this Workspace's Groups, Syncs, Channels, and message history. Other Workspaces in the file are left out. They join the Groups here with an invite code. When two Workspaces move, the first one imports, the second joins each Group, and then the second imports. Uninstall SyncBot from this Workspace on the old install first, or every message posts twice.
+
+A file with no signature, or one that was changed after it was signed, is still refused.
 
 ## A Workspace that is still installed on both instances
 

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- version list -->
 
+## [Unreleased]
+
+### Added
+
+- Data Tools on the primary Workspace: Repair (Dry Run), Repair, and Purge Soft-Deleted Data
+- Data Migration import accepts a signed file from an install that is not connected. It brings over only the importing Workspace's own data
+- Synced posts carry their post id as Slack message metadata
+
+### Changed
+
+- NOTICE: Database migration in this release; Channels from a Workspace outside their Group are removed, and SQLite stops reusing deleted ids. Back up before upgrading.
+
+### Fixed
+
+- Syncs no longer show or send to a Channel from a Workspace outside their Group, left over from an old unpublish
+- SQLite no longer reuses a deleted row's id, and enforces foreign keys like MySQL and PostgreSQL
+- Purging a Workspace removes its settings and clears it from copied messages. A Workspace still on an External Connection is kept
 
 ## [1.7.6] - 2026-11-06
 
