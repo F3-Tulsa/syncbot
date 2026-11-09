@@ -157,6 +157,51 @@ def test_run_while_running_returns_the_error():
     assert "already running" in result["errors"]["data_tools_option"]
 
 
+def test_same_submission_is_not_already_running():
+    from helpers._cache import _cache_delete
+
+    other = _body()
+    other["view"] = {**other["view"], "id": "V2", "hash": "other"}
+    try:
+        with _allow():
+            first = handle_data_tools_submit_ack(_body(), MagicMock(), {})
+            again = handle_data_tools_submit_ack(_body(), MagicMock(), {})
+            blocked = handle_data_tools_submit_ack(other, MagicMock(), {})
+        assert first["response_action"] == "update"
+        assert again["response_action"] == "update"
+        assert "already running" in blocked["errors"]["data_tools_option"]
+    finally:
+        _cache_delete("data_tools_running")
+
+
+def test_production_repeat_of_the_ack_still_dms_the_report():
+    import app as app_module
+    from helpers._cache import _cache_delete
+
+    body = _body()
+    body["type"] = "view_submission"
+    body["view"]["callback_id"] = "data_tools_submit"
+    body["view"]["hash"] = "hash-1"
+    client = MagicMock()
+    try:
+        with (
+            _allow(),
+            _notice_patches(),
+            patch("handlers.data_tools.run_repair") as repair,
+            _dm_text() as dm,
+            patch.object(app_module, "LOCAL_DEVELOPMENT", False),
+            patch.object(app_module, "emit_metric"),
+        ):
+            repair.return_value.count.return_value = 0
+            handle_data_tools_submit_ack(body, client, {})
+            app_module.main_response(body, MagicMock(), client, MagicMock(), {})
+        dm.assert_called_once()
+        assert "Result: No issues found. Nothing was changed." in dm.call_args.args[2]
+        client.views_update.assert_not_called()
+    finally:
+        _cache_delete("data_tools_running")
+
+
 def test_run_shows_the_running_text():
     labels = {
         "verify": "Verify",

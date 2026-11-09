@@ -72,18 +72,31 @@ def handle_data_tools(body: dict, client: WebClient, logger: Logger, context: di
     orm.update_opened_view(client, body, trigger_id, build_data_tools_view())
 
 
+def _build_submission_token(body: dict) -> str:
+    """Token for this view submission.
+
+    Production runs the ack again before the work. The same view is that
+    repeat. A different view is another click.
+    """
+    view = body.get("view") if isinstance(body.get("view"), dict) else {}
+    user_id = helpers.get_user_id_from_body(body) or ""
+    return f"{user_id}:{view.get('id') or ''}:{view.get('hash') or ''}"
+
+
 def handle_data_tools_submit_ack(body: dict, client: WebClient, context: dict) -> dict | None:
     """Ack phase: refuse a second run, then show the wait view."""
     if not _allowed(client, body):
         return None
-    if _cache_get(_RUNNING_KEY):
+    token = _build_submission_token(body)
+    current = _cache_get(_RUNNING_KEY)
+    if current and current != token:
         return {
             "response_action": "errors",
             "errors": {
                 actions.CONFIG_DATA_TOOLS_OPTION: "Data Tools is already running. Try again in a few minutes.",
             },
         }
-    _cache_set(_RUNNING_KEY, True, ttl=_RUNNING_TTL)
+    _cache_set(_RUNNING_KEY, token, ttl=_RUNNING_TTL)
     label = _option_label(_get_selected_option_value(body, actions.CONFIG_DATA_TOOLS_OPTION))
     return _wait_modal_ack(
         title="Data Tools",
