@@ -89,18 +89,21 @@ def handle_data_tools_submit_ack(body: dict, client: WebClient, context: dict) -
 
     The ack only reads the lock. Production runs the ack again before the work,
     so the work phase takes and releases it. A failed read lets the work phase
-    decide. The replay does not log again.
+    decide.
+
+    The replay never refuses: Slack already has the first answer, and an error
+    here would skip the work, so a submission the first ack accepted would get
+    no report. The work phase finds a held lock itself and DMs that.
     """
     if not _allowed(client, body):
         return None
-    if _lock_held(context):
-        if not _is_ack_replay(context):
-            log_info(
-                "data_tools_busy",
-                phase="ack",
-                user_id=helpers.get_user_id_from_body(body),
-                option=_get_selected_option_value(body, actions.CONFIG_DATA_TOOLS_OPTION),
-            )
+    if not _is_ack_replay(context) and _lock_held():
+        log_info(
+            "data_tools_busy",
+            phase="ack",
+            user_id=helpers.get_user_id_from_body(body),
+            option=_get_selected_option_value(body, actions.CONFIG_DATA_TOOLS_OPTION),
+        )
         return {
             "response_action": "errors",
             "errors": {actions.CONFIG_DATA_TOOLS_OPTION: _MAINTENANCE_BUSY_TEXT},
@@ -114,12 +117,11 @@ def handle_data_tools_submit_ack(body: dict, client: WebClient, context: dict) -
     )
 
 
-def _lock_held(context: dict | None) -> bool:
+def _lock_held() -> bool:
     try:
         return is_lock_held(DATA_MAINTENANCE, DATA_MAINTENANCE_TTL)
     except Exception:
-        if not _is_ack_replay(context):
-            log_warning("data_tools_lock_read_failed", exc_info=True)
+        log_warning("data_tools_lock_read_failed", exc_info=True)
         return False
 
 

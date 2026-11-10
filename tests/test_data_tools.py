@@ -206,16 +206,46 @@ def test_ack_shows_the_wait_view_when_the_lock_cannot_be_read():
     assert log_warning.call_args.args[0] == "data_tools_lock_read_failed"
 
 
-def test_ack_replay_does_not_log_busy_again():
+def test_ack_replay_never_refuses():
     with (
         _allow(),
-        patch("handlers.data_tools.is_lock_held", return_value=True),
+        patch("handlers.data_tools.is_lock_held", return_value=True) as held,
         patch("handlers.data_tools.log_info") as log_info,
     ):
         first = handle_data_tools_submit_ack(_body(), MagicMock(), {})
         replay = handle_data_tools_submit_ack(_body(), MagicMock(), {"view_ack_replay": True})
-    assert first == replay
+    assert first["response_action"] == "errors"
+    assert replay["response_action"] == "update"
+    assert held.call_count == 1
     assert [call.args[0] for call in log_info.call_args_list] == ["data_tools_busy"]
+
+
+def test_lock_taken_between_ack_and_replay_still_dms(real_db):
+    import app as app_module
+    from db.run_lock import DATA_MAINTENANCE, release_lock
+
+    body = _body()
+    body["type"] = "view_submission"
+    body["view"]["callback_id"] = "data_tools_submit"
+    with _allow():
+        first = handle_data_tools_submit_ack(body, MagicMock(), {})
+    assert first["response_action"] == "update"
+    token = _hold_lock()
+    try:
+        with (
+            _allow(),
+            _notice_patches(),
+            patch("handlers.data_tools.run_repair") as repair,
+            _dm_text() as dm,
+            patch.object(app_module, "LOCAL_DEVELOPMENT", False),
+            patch.object(app_module, "emit_metric"),
+        ):
+            app_module.main_response(body, MagicMock(), MagicMock(), MagicMock(), {})
+        repair.assert_not_called()
+        dm.assert_called_once()
+        assert "Result: A maintenance action is already in progress. Nothing was changed." in dm.call_args.args[2]
+    finally:
+        release_lock(DATA_MAINTENANCE, token)
 
 
 def test_production_marks_the_ack_replay():
