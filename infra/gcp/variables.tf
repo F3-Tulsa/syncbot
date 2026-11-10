@@ -240,7 +240,13 @@ variable "primary_workspace" {
 variable "enable_db_reset" {
   type        = string
   default     = ""
-  description = "ENABLE_DB_RESET: set to \"true\" for Reset Database when PRIMARY_WORKSPACE matches; empty omits."
+  description = "ENABLE_DB_RESET: set to \"true\" for Reset Database when PRIMARY_WORKSPACE matches. Empty or \"false\" turns it off. The deploy script does not carry it over."
+}
+
+variable "enable_unsigned_import" {
+  type        = string
+  default     = ""
+  description = "ENABLE_UNSIGNED_IMPORT: set to \"true\" to import a migration file whose signature cannot be checked, on any Workspace. Empty or \"false\" turns it off. The deploy script does not carry it over."
 }
 
 variable "database_tls_enabled" {

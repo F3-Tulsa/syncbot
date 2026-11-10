@@ -913,6 +913,12 @@ def _import_finished_text(
             f":white_check_mark: Import finished. SyncBot is already uninstalled from this Workspace "
             f"on `{source_name}`, so its Syncs are running."
         )
+    elif result == "resumed" and source_kind == "unchecked":
+        text = (
+            ":white_check_mark: Import finished. This Workspace's Syncs are running. "
+            "The file had no signature SyncBot could check. "
+            "Other Workspaces in the file were left out; invite them to the Groups here."
+        )
     elif result == "resumed" and source_kind in _STANDALONE_KINDS:
         text = (
             ":white_check_mark: Import finished. This Workspace's Syncs are running. "
@@ -946,6 +952,11 @@ def handle_data_migration_submit_ack(
         return None
 
     kind, signer = ei.get_migration_file_status(data)
+    if kind == "unchecked" and not helpers.unsigned_import_enabled():
+        return {
+            "response_action": "errors",
+            "errors": {actions.CONFIG_DATA_MIGRATION_JSON_INPUT: _UNSIGNED_OFF_TEXT},
+        }
     if kind not in _IMPORTABLE_KINDS:
         source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else {}
         name = ei.format_migration_source_name(str(source.get("instance_id") or ""), signer)
@@ -972,7 +983,14 @@ def handle_data_migration_submit_ack(
     from slack.blocks import section
 
     blocks = []
-    if kind == "connected":
+    if kind == "unchecked":
+        blocks.append(
+            section(
+                ":warning: This file has no signature SyncBot can check, so it may have been changed. "
+                "Only import a file you exported."
+            )
+        )
+    elif kind == "connected":
         blocks.append(
             section(
                 f":package: This file was exported from this Workspace on `{source_name}`, "
@@ -989,6 +1007,15 @@ def handle_data_migration_submit_ack(
         )
     else:
         blocks.append(section(":package: This file was exported from this Workspace on this SyncBot instance."))
+    if kind != "unchecked":
+        fingerprint = str(source.get("instance_id") or "").strip()
+        if fingerprint:
+            blocks.append(
+                section(
+                    f"Fingerprint: `{fingerprint}`. Compare this with Fingerprint in Settings "
+                    "on the instance that exported the file."
+                )
+            )
     blocks.extend(_migration_overview_blocks(data))
     missing = _migration_workspace_names_not_here(data, workspace_record.team_id)
     if missing and kind not in _STANDALONE_KINDS:
@@ -1033,9 +1060,13 @@ def handle_data_migration_submit_ack(
     }
 
 
+_UNSIGNED_OFF_TEXT = (
+    "This file has no signature SyncBot can check, so SyncBot will not import it. "
+    "Whoever runs this deployment can set ENABLE_UNSIGNED_IMPORT for this move, then turn it off."
+)
 _IMPORT_FAIL_TEXT = ":warning: Import failed. Try the import again."
 _IMPORT_EXPIRED_TEXT = ":warning: That import expired. Try the import again."
-_STANDALONE_KINDS = frozenset({"unknown", "not_connected", "federation_off"})
+_STANDALONE_KINDS = frozenset({"unknown", "not_connected", "federation_off", "unchecked"})
 _IMPORTABLE_KINDS = frozenset({"this_install", "connected"}) | _STANDALONE_KINDS
 
 
@@ -1052,11 +1083,6 @@ def _migration_refused_text(kind: str, name: str) -> str:
         return (
             "This file was changed after it was exported, so SyncBot will not import it. "
             "Export it again from the instance that made it."
-        )
-    if kind == "unchecked":
-        return (
-            "SyncBot cannot check this file. Export it again from this instance or from a connected instance. "
-            "A file from before 1.7.3 needs a new export."
         )
     return "SyncBot will not import this file."
 
@@ -1119,6 +1145,9 @@ def _complete_data_migration_import(
         _notify_import_result(client, body, user_id, _IMPORT_FAIL_TEXT)
         return
     kind, signer = ei.get_migration_file_status(data)
+    if kind == "unchecked" and not helpers.unsigned_import_enabled():
+        _notify_import_result(client, body, user_id, ":warning: Import stopped. " + _UNSIGNED_OFF_TEXT)
+        return
     if kind not in _IMPORTABLE_KINDS:
         source = data.get("source_instance") if isinstance(data.get("source_instance"), dict) else {}
         instance_id = str(source.get("instance_id") or "")

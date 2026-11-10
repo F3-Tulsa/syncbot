@@ -115,6 +115,7 @@ jobs:
           LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
           PRIMARY_WORKSPACE: ${{ vars.PRIMARY_WORKSPACE }}
           ENABLE_DB_RESET: ${{ vars.ENABLE_DB_RESET }}
+          ENABLE_UNSIGNED_IMPORT: ${{ vars.ENABLE_UNSIGNED_IMPORT }}
           AWS_ENABLE_XRAY: ${{ vars.AWS_ENABLE_XRAY || vars.ENABLE_XRAY || 'false' }}
           SLACK_CLIENT_ID: ${{ vars.SLACK_CLIENT_ID }}
           SLACK_CLIENT_SECRET: ${{ secrets.SLACK_CLIENT_SECRET }}
@@ -197,6 +198,7 @@ jobs:
           LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
           PRIMARY_WORKSPACE: ${{ vars.PRIMARY_WORKSPACE }}
           ENABLE_DB_RESET: ${{ vars.ENABLE_DB_RESET }}
+          ENABLE_UNSIGNED_IMPORT: ${{ vars.ENABLE_UNSIGNED_IMPORT }}
           AWS_ENABLE_XRAY: ${{ vars.AWS_ENABLE_XRAY || vars.ENABLE_XRAY || 'false' }}
           SLACK_CLIENT_ID: ${{ vars.SLACK_CLIENT_ID }}
           SLACK_CLIENT_SECRET: ${{ secrets.SLACK_CLIENT_SECRET }}

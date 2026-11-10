@@ -197,6 +197,7 @@ push_github_aws_ci_config() {
   _gh_push_from_env_file LOG_LEVEL env LOG_LEVEL
   _gh_push_from_env_file PRIMARY_WORKSPACE env PRIMARY_WORKSPACE
   _gh_push_from_env_file ENABLE_DB_RESET env ENABLE_DB_RESET
+  _gh_push_from_env_file ENABLE_UNSIGNED_IMPORT env ENABLE_UNSIGNED_IMPORT
   _gh_push_from_env_file AWS_ENABLE_XRAY env AWS_ENABLE_XRAY ENABLE_XRAY
   _gh_push_from_env_file SLACK_CLIENT_ID env SLACK_CLIENT_ID
   _gh_push_from_env_file DATABASE_PASSWORD secret DATABASE_PASSWORD
@@ -812,6 +813,7 @@ write_deploy_receipt() {
 - SLACK_CLIENT_ID=${SLACK_CLIENT_ID:-}
 - AWS_ENABLE_XRAY=${AWS_ENABLE_XRAY:-false}
 - ENABLE_DB_RESET=${ENABLE_DB_RESET:-false}
+- ENABLE_UNSIGNED_IMPORT=${ENABLE_UNSIGNED_IMPORT:-false}
 
 ## Secrets
 - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
@@ -1139,7 +1141,8 @@ if [[ "${ENV_FILE_LOADED:-}" == "true" ]]; then
     "DatabaseUser=${DATABASE_USER:-}"
     "LogLevel=${LOG_LEVEL:-INFO}"
     "PrimaryWorkspace=${PRIMARY_WORKSPACE:-}"
-    "EnableDbReset=${ENABLE_DB_RESET:-}"
+    "EnableDbReset=${ENABLE_DB_RESET:-false}"
+    "EnableUnsignedImport=${ENABLE_UNSIGNED_IMPORT:-false}"
     "DatabaseTlsEnabled=${DATABASE_TLS_ENABLED:-}"
     "DatabaseSslCaPath=${DATABASE_SSL_CA_PATH:-}"
     "EnableXRay=${AWS_ENABLE_XRAY:-false}"
@@ -1248,7 +1251,6 @@ PREV_DATABASE_MODE=""
 PREV_ENABLE_KEEP_WARM=""
 PREV_LOG_LEVEL=""
 PREV_PRIMARY_WORKSPACE=""
-PREV_ENABLE_DB_RESET=""
 PREV_DB_TLS=""
 PREV_DB_SSL_CA=""
 PREV_DATABASE_HOST_IN_USE=""
@@ -1275,7 +1277,6 @@ if [[ -n "$EXISTING_STACK_STATUS" && "$EXISTING_STACK_STATUS" != "None" ]]; then
   PREV_DATABASE_SCHEMA="$(stack_param_value "$EXISTING_STACK_PARAMS" "DatabaseSchema")"
   PREV_LOG_LEVEL="$(stack_param_value "$EXISTING_STACK_PARAMS" "LogLevel")"
   PREV_PRIMARY_WORKSPACE="$(stack_param_value "$EXISTING_STACK_PARAMS" "PrimaryWorkspace")"
-  PREV_ENABLE_DB_RESET="$(stack_param_value "$EXISTING_STACK_PARAMS" "EnableDbReset")"
   PREV_DB_TLS="$(stack_param_value "$EXISTING_STACK_PARAMS" "DatabaseTlsEnabled")"
   PREV_DB_SSL_CA="$(stack_param_value "$EXISTING_STACK_PARAMS" "DatabaseSslCaPath")"
   EXISTING_STACK_OUTPUTS="$(app_describe_outputs "$STACK_NAME" "$REGION")"
@@ -1453,7 +1454,6 @@ if [[ "$IS_STACK_UPDATE" == "true" && -n "$PREV_LOG_LEVEL" ]]; then
 fi
 
 PRIMARY_WORKSPACE="${PREV_PRIMARY_WORKSPACE:-}"
-ENABLE_DB_RESET="${PREV_ENABLE_DB_RESET:-}"
 DATABASE_TLS_ENABLED="${PREV_DB_TLS:-}"
 DATABASE_SSL_CA_PATH="${PREV_DB_SSL_CA:-}"
 
@@ -1477,10 +1477,15 @@ if [[ -n "$PRIMARY_WORKSPACE" ]]; then
 else
   echo "Primary workspace: (not set — backup/restore hidden)"
 fi
-if [[ "$ENABLE_DB_RESET" == "true" ]]; then
+if [[ "${ENABLE_DB_RESET:-}" == "true" ]]; then
   echo "DB reset:          enabled (PRIMARY_WORKSPACE must match)"
 else
   echo "DB reset:          (disabled)"
+fi
+if [[ "${ENABLE_UNSIGNED_IMPORT:-}" == "true" ]]; then
+  echo "Unsigned import:   enabled"
+else
+  echo "Unsigned import:   (disabled)"
 fi
 echo "Deploy bucket:    $S3_BUCKET"
 if [[ "$DATABASE_BACKEND" != "sqlite" ]]; then
@@ -1520,7 +1525,9 @@ PARAMS=(
 )
 [[ -n "${DATABASE_USER:-}" ]] && PARAMS+=("DatabaseUser=$DATABASE_USER")
 [[ -n "$PRIMARY_WORKSPACE" ]] && PARAMS+=("PrimaryWorkspace=$PRIMARY_WORKSPACE")
-[[ -n "$ENABLE_DB_RESET" ]] && PARAMS+=("EnableDbReset=$ENABLE_DB_RESET")
+# Not carried over from the last deploy: unset turns both switches off.
+PARAMS+=("EnableDbReset=${ENABLE_DB_RESET:-false}")
+PARAMS+=("EnableUnsignedImport=${ENABLE_UNSIGNED_IMPORT:-false}")
 [[ -n "$DATABASE_TLS_ENABLED" ]] && PARAMS+=("DatabaseTlsEnabled=$DATABASE_TLS_ENABLED")
 [[ -n "$DATABASE_SSL_CA_PATH" ]] && PARAMS+=("DatabaseSslCaPath=$DATABASE_SSL_CA_PATH")
 PARAMS+=("EnableXRay=${AWS_ENABLE_XRAY:-false}")

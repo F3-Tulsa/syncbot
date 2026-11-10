@@ -619,9 +619,9 @@ def format_migration_source_name(instance_id: str, row=None) -> str:
 def get_migration_file_status(data: dict) -> tuple[str, object | None]:
     """Classify a migration file before Import will accept it.
 
-    ``unchecked`` has no signature. ``tampered`` has a signature that does not
-    check. ``this_install`` and ``connected`` may be imported. Anything else
-    is refused. The self row is trusted, so it is checked before a peer.
+    ``unchecked`` has no signature SyncBot can check. ``tampered`` has a
+    signature that does not check and is refused. The self row is trusted, so
+    it is checked before a peer.
     """
     from helpers.settings import federation_enabled
     from helpers.workspace_kind import is_self_instance, peer_is_trusted

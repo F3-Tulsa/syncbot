@@ -55,6 +55,7 @@ locals {
     },
     trimspace(var.primary_workspace) != "" ? { PRIMARY_WORKSPACE = var.primary_workspace } : {},
     trimspace(var.enable_db_reset) != "" ? { ENABLE_DB_RESET = var.enable_db_reset } : {},
+    trimspace(var.enable_unsigned_import) != "" ? { ENABLE_UNSIGNED_IMPORT = var.enable_unsigned_import } : {},
   )
 
   existing_plain_env = merge(
@@ -70,6 +71,7 @@ locals {
     },
     trimspace(var.primary_workspace) != "" ? { PRIMARY_WORKSPACE = var.primary_workspace } : {},
     trimspace(var.enable_db_reset) != "" ? { ENABLE_DB_RESET = var.enable_db_reset } : {},
+    trimspace(var.enable_unsigned_import) != "" ? { ENABLE_UNSIGNED_IMPORT = var.enable_unsigned_import } : {},
     var.database_tls_enabled != "" ? { DATABASE_TLS_ENABLED = var.database_tls_enabled } : {},
     trimspace(var.database_ssl_ca_path) != "" ? { DATABASE_SSL_CA_PATH = var.database_ssl_ca_path } : {},
     trimspace(var.database_port) != "" ? { DATABASE_PORT = trimspace(var.database_port) } : {},

@@ -14,6 +14,7 @@ os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-0-0")
 from helpers.core import (  # noqa: E402
     is_backup_visible_for_workspace,
     is_db_reset_visible_for_workspace,
+    unsigned_import_enabled,
 )
 
 
@@ -54,3 +55,20 @@ class TestIsDbResetVisibleForWorkspace:
     def test_team_mismatch_denies(self):
         with patch.dict(os.environ, {"PRIMARY_WORKSPACE": "TABC123", "ENABLE_DB_RESET": "true"}):
             assert is_db_reset_visible_for_workspace("TOTHER") is False
+
+
+class TestUnsignedImportEnabled:
+    def test_unset_is_off(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ENABLE_UNSIGNED_IMPORT", None)
+            assert unsigned_import_enabled() is False
+
+    @pytest.mark.parametrize("truthy", ("true", "1", "yes", "TRUE"))
+    def test_truthy_strings(self, truthy: str):
+        with patch.dict(os.environ, {"ENABLE_UNSIGNED_IMPORT": truthy, "PRIMARY_WORKSPACE": ""}):
+            assert unsigned_import_enabled() is True
+
+    @pytest.mark.parametrize("falsy", ("false", "no", "0", "team-id"))
+    def test_other_strings_are_off(self, falsy: str):
+        with patch.dict(os.environ, {"ENABLE_UNSIGNED_IMPORT": falsy}):
+            assert unsigned_import_enabled() is False

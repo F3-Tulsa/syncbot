@@ -663,7 +663,7 @@ def test_export_signature_names_this_install(real_db):
     assert verify_migration_signature({"version": 1, "groups": []}) is False
 
 
-def test_review_refuses_a_file_with_no_signature():
+def test_review_warns_when_a_file_has_no_signature():
     from handlers.export_import import handle_data_migration_submit_ack
 
     payload = {"version": 1, "workspace": {"team_id": "T1"}, "groups": []}
@@ -683,18 +683,30 @@ def test_review_refuses_a_file_with_no_signature():
             }
         },
     }
-    with (
-        patch("handlers.export_import._is_admin", return_value=True),
-        patch("handlers.export_import._download_uploaded_file", return_value=(json.dumps(payload), None)),
-        patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
-        patch("handlers.export_import.DbManager.find_records", return_value=[]),
-        patch("helpers._cache._cache_set") as cache_set,
-    ):
-        resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
-    assert resp["response_action"] == "errors"
-    assert "cannot check this file" in resp["errors"]["data_migration_json_input"]
-    assert "1.7.3" in resp["errors"]["data_migration_json_input"]
-    cache_set.assert_not_called()
+
+    def submit(*, enabled: bool):
+        env = {"ENABLE_UNSIGNED_IMPORT": "true" if enabled else ""}
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch("handlers.export_import._is_admin", return_value=True),
+            patch("handlers.export_import._download_uploaded_file", return_value=(json.dumps(payload), None)),
+            patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
+            patch("handlers.export_import.DbManager.find_records", return_value=[]),
+            patch("helpers._cache._cache_set") as cache_set,
+        ):
+            return handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {}), cache_set
+
+    refused, refused_cache = submit(enabled=False)
+    assert refused["response_action"] == "errors"
+    assert "ENABLE_UNSIGNED_IMPORT" in refused["errors"]["data_migration_json_input"]
+    refused_cache.assert_not_called()
+
+    allowed, allowed_cache = submit(enabled=True)
+    assert allowed["response_action"] == "update"
+    text = json.dumps(allowed["view"])
+    assert "no signature SyncBot can check" in text
+    assert allowed["view"]["title"]["text"] == "Confirm Import"
+    allowed_cache.assert_called_once()
 
 
 def test_export_omits_a_disbanded_group_and_a_group_this_workspace_left(real_db):

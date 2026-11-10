@@ -42,7 +42,7 @@ From the **repository root**:
 
 **Bootstrap (AWS):** The first `./deploy.sh --env test` creates the bootstrap CloudFormation stack if it is missing. Later deploys skip CloudFormation when `template.bootstrap.yaml` is unchanged (the hash is stored as stack parameter `TemplateContentSha256`). Pass `--bootstrap` to force a sync even when the hash matches. GCP has no separate bootstrap stack (`terraform apply` is the whole stack), so `--bootstrap` is ignored there.
 
-**GitHub setup:** Add `--setup-github` after a local deploy to copy config into GitHub (`./deploy.sh --env test --setup-github`). On AWS, it pushes uncommented non-empty env-file keys that AWS CI actually reads (including `PRIMARY_WORKSPACE`, federation, TLS, and `ENABLE_DB_RESET` when you set them). On GCP, it only writes repo Workload Identity Federation vars and `GITHUB_DEPLOY_TARGET`. You still **redeploy** (local `./deploy.sh` or a push to `test`/`prod`) for Lambda to pick up new app settings. GitHub cannot create the first AWS bootstrap stack and never runs GCP `terraform apply`. Local deploys still use your AWS or gcloud credentials even if GitHub Actions is already configured.
+**GitHub setup:** Add `--setup-github` after a local deploy to copy config into GitHub (`./deploy.sh --env test --setup-github`). On AWS, it pushes uncommented non-empty env-file keys that AWS CI actually reads (including `PRIMARY_WORKSPACE`, federation, TLS, `ENABLE_DB_RESET`, and `ENABLE_UNSIGNED_IMPORT` when you set them). On GCP, it only writes repo Workload Identity Federation vars and `GITHUB_DEPLOY_TARGET`. You still **redeploy** (local `./deploy.sh` or a push to `test`/`prod`) for Lambda to pick up new app settings. GitHub cannot create the first AWS bootstrap stack and never runs GCP `terraform apply`. Local deploys still use your AWS or gcloud credentials even if GitHub Actions is already configured.
 
 Set **`GITHUB_REPO=YOUR_GITHUB_OWNER/YOUR_REPO`** in `.env.deploy.test` or `.env.deploy.prod` (or export it) to skip the prompt when both a fork and upstream remote exist. That value stays local; the script does not push it as a GitHub variable.
 
@@ -205,7 +205,8 @@ Only fill the provider block that matches `CLOUD_PROVIDER`, and only fill the da
 |----------|-------|
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` (default `INFO`). At DEBUG, `log_debug()` events include skip, `workspace_convert`, `teams_convert`, missing bot token, pipeline fan-out, file share timestamps, and `/teams`. `log_info()` covers migration export/import and pair. |
 | `PRIMARY_WORKSPACE` | Slack Team ID that unlocks Backup/Restore (and scopes DB reset). Takes effect after a redeploy. |
-| `ENABLE_DB_RESET` | `true` / `false` (default `false`). Shows the Reset Database button, and only on the primary workspace. |
+| `ENABLE_DB_RESET` | `true` / `false` (default `false`). Shows the Reset Database button, and only on the primary workspace. A deploy without it turns the button off. Set it in the env file to keep it, and in GitHub too if `--setup-github` copied it. |
+| `ENABLE_UNSIGNED_IMPORT` | `true` / `false` (default `false`). Lets Data Migration import a file whose signature cannot be checked, such as an export from before 1.7.3, on any Workspace. A deploy without it turns that import off. Set it back to `false` after the import, in GitHub too if `--setup-github` copied it. |
 
 How long uninstalled workspace data is kept and whether federation is on are set in **Settings** on the primary workspace. Extra managers and whether private Channels may be published are per-workspace Settings on every installed workspace. Those are not environment variables. This instance's federation id is derived from its Ed25519 public key; you do not pin a UUID at deploy time.
 

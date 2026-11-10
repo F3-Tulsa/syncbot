@@ -47,6 +47,7 @@ from helpers.core import (
     is_workspace_admin,
     is_workspace_manager,
     safe_get,
+    unsigned_import_enabled,
 )
 from helpers.data_repair import RepairReport, run_repair
 from helpers.encryption import decrypt_bot_token, encrypt_bot_token
@@ -370,6 +371,7 @@ __all__ = [
     "is_backup_visible_for_workspace",
     "is_settings_visible_for_workspace",
     "is_db_reset_visible_for_workspace",
+    "unsigned_import_enabled",
     "is_primary_workspace",
     "is_workspace_admin",
     "is_workspace_manager",

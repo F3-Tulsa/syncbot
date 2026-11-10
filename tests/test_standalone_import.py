@@ -201,7 +201,37 @@ def test_import_from_unknown_instance_cannot_join_an_existing_group(real_db):
     assert "left out" in text
 
 
-def test_unsigned_and_tampered_files_are_still_refused(real_db):
+def test_unsigned_import_does_nothing_while_the_switch_is_off(real_db):
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+
+    workspace_a = _workspace("T0000000A", "Workspace A", get_instance_id())
+    payload, _instance_id, _pem = _sign(_file())
+    payload.pop("signature")
+    with patch.dict(os.environ, {"ENABLE_UNSIGNED_IMPORT": ""}, clear=False):
+        text, pushed = _run(workspace_a, payload)
+    assert DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.id.isnot(None)]) == []
+    pushed.assert_not_called()
+    assert "ENABLE_UNSIGNED_IMPORT" in text
+
+
+def test_unsigned_import_writes_only_this_workspace(real_db):
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+
+    workspace_a = _workspace("T0000000A", "Workspace A", get_instance_id())
+    payload, _instance_id, _pem = _sign(_file())
+    payload.pop("signature")
+    with patch.dict(os.environ, {"ENABLE_UNSIGNED_IMPORT": "true"}, clear=False):
+        text, pushed = _run(workspace_a, payload)
+    channels = DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.id.isnot(None)])
+    assert [row.channel_id for row in channels] == ["CA"]
+    pushed.assert_not_called()
+    assert "no signature SyncBot could check" in text
+    assert "were left out" in text
+
+
+def test_unsigned_file_warns_and_a_changed_file_is_refused(real_db):
     from federation.core import get_instance_id
     from handlers.export_import import handle_data_migration_submit_ack
 
@@ -212,7 +242,7 @@ def test_unsigned_and_tampered_files_are_still_refused(real_db):
     changed = dict(payload)
     changed["workspace"] = {"team_id": "T0000000A", "workspace_name": "Edited"}
 
-    def ack(data):
+    def ack(data, *, enabled=False):
         body = {
             "user": {"id": "U1"},
             "team": {"id": "T0000000A"},
@@ -228,7 +258,9 @@ def test_unsigned_and_tampered_files_are_still_refused(real_db):
                 }
             },
         }
+        env = {"ENABLE_UNSIGNED_IMPORT": "true" if enabled else ""}
         with (
+            patch.dict(os.environ, env, clear=False),
             patch("handlers.export_import._is_admin", return_value=True),
             patch(
                 "handlers.export_import._download_uploaded_file", return_value=(__import__("json").dumps(data), None)
@@ -237,8 +269,12 @@ def test_unsigned_and_tampered_files_are_still_refused(real_db):
         ):
             return handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
 
-    unsigned_resp = ack(unsigned)
-    assert "cannot check this file" in unsigned_resp["errors"]["data_migration_json_input"]
+    refused = ack(unsigned)
+    assert refused["response_action"] == "errors"
+    assert "ENABLE_UNSIGNED_IMPORT" in refused["errors"]["data_migration_json_input"]
+    unsigned_resp = ack(unsigned, enabled=True)
+    assert unsigned_resp["response_action"] == "update"
+    assert "no signature SyncBot can check" in __import__("json").dumps(unsigned_resp["view"])
     tampered = ack(changed)
     assert "changed after it was exported" in tampered["errors"]["data_migration_json_input"]
 
@@ -376,4 +412,5 @@ def test_review_names_the_signer_by_fingerprint(real_db):
         resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
     text = __import__("json").dumps(resp["view"])
     assert f"Connection {instance_id[:8]}" in text
+    assert f"Fingerprint: `{instance_id}`" in text
     assert "Secret Install" not in text
