@@ -47,7 +47,7 @@ Data Tools is on the primary Workspace's Home tab, for a Slack admin there. It c
 - **Repair** fixes what Verify finds.
 - **Purge Soft-Deleted Data** removes soft-deleted data now, instead of waiting for the retention period.
 
-Choose Run. The modal tells you to close it, and the report arrives by DM, even when nothing was found.
+Choose Run. The modal tells you to close it, and the report arrives by DM, even when nothing was found. A finished Repair deletes leftover rows for good. A failed Repair leaves the database as it was.
 
 ## Move a Workspace
 

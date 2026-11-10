@@ -100,7 +100,7 @@ def _sync(group, uid):
     return DbManager.create_record(schemas.Sync(title="general", sync_mode="group", group_id=group.id, uid=uid))
 
 
-def _channel(sync, workspace, channel_id, *, created_at=None, channel_name=None):
+def _channel(sync, workspace, channel_id, *, created_at=None, channel_name=None, status="active"):
     from db import DbManager, schemas
 
     return DbManager.create_record(
@@ -109,7 +109,7 @@ def _channel(sync, workspace, channel_id, *, created_at=None, channel_name=None)
             workspace_id=workspace.id,
             channel_id=channel_id,
             channel_name=channel_name,
-            status="active",
+            status=status,
             publishes=True,
             subscribes=True,
             created_at=created_at or _now(),
@@ -222,6 +222,67 @@ def test_duplicate_channel_is_removed_only_on_fix(real_db):
     assert run_repair(fix=True).count("duplicate_channel") == 1
     assert len(DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.channel_id == "CA"])) == 1
     assert run_repair(fix=True).count("duplicate_channel") == 0
+
+
+def test_duplicate_channel_keeps_the_active_row(real_db):
+    group = _group("GRP-RANK")
+    workspace = _workspace("T0000000A", "Workspace A")
+    _member(group, workspace)
+    sync = _sync(group, "s-rank")
+    paused = _channel(sync, workspace, "CA", created_at=_now() - timedelta(days=2), status="paused")
+    active = _channel(sync, workspace, "CA", created_at=_now(), status="active")
+    _post(paused, "P1", "1700000000.000100")
+    _post(active, "P2", "1700000000.000200")
+    from db import DbManager, schemas
+    from helpers.data_repair import run_repair
+
+    run_repair(fix=True)
+    kept = DbManager.find_records(schemas.PostMeta, [schemas.PostMeta.sync_channel_id == active.id])
+    assert sorted(row.post_id for row in kept) == ["P1", "P2"]
+    assert DbManager.get_record(schemas.SyncChannel, id=paused.id) is None
+
+
+def test_failed_repair_leaves_the_database_unchanged(real_db):
+    group = _group("GRP-ROLL")
+    workspace = _workspace("T0000000A", "Workspace A")
+    other = _workspace("T0000000C", "Workspace C")
+    _member(group, workspace)
+    sync = _sync(group, "s-roll")
+    channel = _channel(sync, other, "CC")
+    _post(channel, "PC")
+    _fk_off(
+        "INSERT INTO workspace_settings (workspace_id, key, value) VALUES (424242, 'allow_private_channels', 'no')",
+        (),
+    )
+    from db import DbManager, schemas
+    from helpers.data_repair import run_repair
+
+    with (
+        patch("helpers.data_repair._fix_workspace_rows", side_effect=RuntimeError("boom")),
+        patch("helpers.data_repair.log_error") as log_error,
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        run_repair(fix=True)
+    assert log_error.call_args.args[0] == "data_repair_rolled_back"
+    assert log_error.call_args.kwargs["step"] == "rows_missing_workspace"
+    assert DbManager.get_record(schemas.SyncChannel, id=channel.id) is not None
+    assert DbManager.find_records(schemas.PostMeta, [schemas.PostMeta.post_id == "PC"])
+    settings = DbManager.find_records(schemas.WorkspaceSetting, [schemas.WorkspaceSetting.workspace_id == 424242])
+    assert len(settings) == 1
+
+
+def test_orphan_message_records_are_removed_in_batches(real_db):
+    for index in range(5):
+        _fk_off(
+            "INSERT INTO post_meta (post_id, sync_channel_id, ts, kind) VALUES (:post_id, 999999, :ts, 'message')",
+            {"post_id": f"P{index}", "ts": index + 1},
+        )
+    from db import DbManager, schemas
+    from helpers.data_repair import run_repair
+
+    with patch("helpers.data_repair._ID_BATCH", 2):
+        assert run_repair(fix=True).count("post_meta_missing_channel") == 5
+    assert DbManager.find_records(schemas.PostMeta, [schemas.PostMeta.sync_channel_id == 999999]) == []
 
 
 def test_duplicate_channel_merge_keeps_post_meta(real_db):
@@ -393,3 +454,43 @@ def test_repair_and_migration_agree(tmp_path):
             return channels, posts, len(settings)
 
     assert run(tmp_path / "repair.db", "repair") == run(tmp_path / "migrate.db", "migrate")
+
+
+def test_repair_logs_what_it_committed(real_db):
+    from helpers.data_repair import run_repair
+
+    with patch("helpers.data_repair.log_info") as log_info:
+        run_repair(fix=False)
+        run_repair(fix=True)
+    events = [call.args[0] for call in log_info.call_args_list]
+    assert events == ["data_repair_verified", "data_repair_committed"]
+    assert log_info.call_args_list[1].kwargs["fixed"] == 0
+
+
+def test_every_db_call_joins_an_open_transaction(real_db):
+    from db import DbManager, schemas, transaction
+
+    workspace = _workspace("T0000000A", "Workspace A")
+    with pytest.raises(RuntimeError, match="boom"), transaction():
+        DbManager.create_record(schemas.InstanceSetting(key="joined", value="1"))
+        DbManager.update_record(schemas.Workspace, workspace.team_id, {schemas.Workspace.workspace_name: "Changed"})
+        assert DbManager.get_record(schemas.Workspace, workspace.team_id).workspace_name == "Changed"
+        assert DbManager.count_records(schemas.Workspace, [schemas.Workspace.id == workspace.id]) == 1
+        DbManager.delete_record(schemas.InstanceSetting, "joined")
+        DbManager.merge_record(schemas.InstanceSetting(key="merged", value="1"))
+        raise RuntimeError("boom")
+    assert DbManager.get_record(schemas.Workspace, workspace.team_id).workspace_name == "Workspace A"
+    assert DbManager.get_record(schemas.InstanceSetting, "merged") is None
+
+
+def test_repair_rollback_log_leaves_out_the_statement(real_db):
+    from helpers.data_repair import run_repair
+
+    with (
+        patch("helpers.data_repair._fix_workspace_rows", side_effect=RuntimeError("SELECT secret")),
+        patch("helpers.data_repair.log_error") as log_error,
+        pytest.raises(RuntimeError),
+    ):
+        run_repair(fix=True)
+    assert "error" not in log_error.call_args.kwargs
+    assert log_error.call_args.kwargs["error_type"] == "RuntimeError"

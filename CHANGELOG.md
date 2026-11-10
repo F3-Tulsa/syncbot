@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A failed Repair leaves the database unchanged, and an active Channel wins over an older paused duplicate
 - Syncs no longer show or send to a Channel from a Workspace outside their Group, left over from an old unpublish
 - SQLite no longer reuses a deleted row's id, and enforces foreign keys like MySQL and PostgreSQL
 - Purging a Workspace removes its settings and clears it from copied messages
