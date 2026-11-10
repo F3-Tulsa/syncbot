@@ -306,6 +306,76 @@ def test_second_workspace_imports_after_joining(real_db):
     assert {row.sync_channel_id for row in posts} == {by_channel["CA"].id, by_channel["CB"].id}
 
 
+def test_standalone_import_keeps_an_existing_group_role(real_db):
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+
+    workspace_a = _workspace("T0000000A", "Workspace A", get_instance_id())
+    payload, _instance_id, _pem = _sign(_file())
+    _run(workspace_a, payload)
+    group = DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.uid == "g-move"])[0]
+    workspace_b = _workspace("T0000000B", "Workspace B", get_instance_id())
+    DbManager.create_record(
+        schemas.WorkspaceGroupMember(
+            group_id=group.id,
+            workspace_id=workspace_b.id,
+            status="active",
+            role="member",
+            joined_at=_now(),
+        )
+    )
+    _run(workspace_b, payload)
+
+    def _role(workspace):
+        rows = DbManager.find_records(
+            schemas.WorkspaceGroupMember,
+            [
+                schemas.WorkspaceGroupMember.group_id == group.id,
+                schemas.WorkspaceGroupMember.workspace_id == workspace.id,
+            ],
+        )
+        return rows[0].role
+
+    assert _role(workspace_a) == "owner"
+    assert _role(workspace_b) == "member"
+
+
+def test_a_bad_directory_row_rolls_the_import_back(real_db):
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+    from handlers.export_import import _IMPORT_FAIL_TEXT
+
+    workspace_a = _workspace("T0000000A", "Workspace A", get_instance_id())
+    DbManager.create_record(
+        schemas.UserDirectory(workspace_id=workspace_a.id, slack_user_id="UKEEP", updated_at=_now())
+    )
+    body = _file()
+    body["user_directory"] = [{"slack_user_id": "UNEW", "updated_at": "not-a-date"}]
+    payload, _instance_id, _pem = _sign(body)
+    text, _pushed = _run(workspace_a, payload)
+    assert text == _IMPORT_FAIL_TEXT
+    directory = DbManager.find_records(schemas.UserDirectory, [schemas.UserDirectory.workspace_id == workspace_a.id])
+    assert [row.slack_user_id for row in directory] == ["UKEEP"]
+    assert DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.uid == "g-move"]) == []
+    assert DbManager.find_records(schemas.Sync, [schemas.Sync.uid == "s-move"]) == []
+
+
+def test_a_failure_partway_rolls_the_import_back(real_db):
+    from db import DbManager, schemas
+    from federation.core import get_instance_id
+    from handlers.export_import import _IMPORT_FAIL_TEXT
+
+    workspace_a = _workspace("T0000000A", "Workspace A", get_instance_id())
+    body = _file()
+    body["post_meta"]["s-move:CA"] = [{"post_id": "P1"}]
+    payload, _instance_id, _pem = _sign(body)
+    text, _pushed = _run(workspace_a, payload)
+    assert text == _IMPORT_FAIL_TEXT
+    assert DbManager.find_records(schemas.WorkspaceGroup, [schemas.WorkspaceGroup.uid == "g-move"]) == []
+    assert DbManager.find_records(schemas.Sync, [schemas.Sync.uid == "s-move"]) == []
+    assert DbManager.find_records(schemas.SyncChannel, [schemas.SyncChannel.channel_id == "CA"]) == []
+
+
 def _peer(instance_id, public_pem, *, status, trust):
     from db import DbManager, schemas
 

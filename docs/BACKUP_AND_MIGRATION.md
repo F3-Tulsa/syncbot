@@ -143,7 +143,9 @@ A signed file carries that instance's fingerprint. Settings on every Workspace s
 
 A file from SyncBot before 1.7.3 cannot be checked, because it does not carry the key that signed it. SyncBot refuses it until whoever runs this deployment sets `ENABLE_UNSIGNED_IMPORT=true` and deploys again. Confirm Import then warns that the file may have been changed. You can import it, and only this Workspace is written. When the move is done, set it back to `false` and deploy again. If `--setup-github` copied it to GitHub, change it there too. A file that has a signature which does not match is refused, because that file was changed after it was signed.
 
-That import brings over only this Workspace's Groups, Syncs, Channels, and message history. Other Workspaces in the file are left out. They join the Groups here with an invite code. When two Workspaces move, the first one imports, the second joins each Group, and then the second imports. Uninstall SyncBot from this Workspace on the old instance first, or every message posts twice.
+That import brings over only this Workspace's Groups, Syncs, Channels, and message history. In a Group that already exists here, this Workspace keeps its role; the file cannot make it an owner. Other Workspaces in the file are left out. They join the Groups here with an invite code. When two Workspaces move, the first one imports, the second joins each Group, and then the second imports. Uninstall SyncBot from this Workspace on the old instance first, or every message posts twice.
+
+If an import fails, nothing from the file is kept. Fix the file or export it again, then import again.
 
 ## A Workspace that is still installed on both instances
 

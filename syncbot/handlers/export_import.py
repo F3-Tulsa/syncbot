@@ -10,7 +10,7 @@ from slack_sdk.web import WebClient
 import builders
 import constants
 import helpers
-from db import DbManager, schemas
+from db import DbManager, schemas, transaction
 from db.run_lock import DATA_MAINTENANCE, DATA_MAINTENANCE_TTL, hold_lock
 from handlers._common import _MAINTENANCE_BUSY_TEXT, _close_modal_done, _update_wait_modal, _wait_modal_ack
 from helpers import export_import as ei
@@ -736,13 +736,17 @@ def _run_migration_import(
     client: WebClient,
     acting_user_id: str | None = None,
     context: dict | None = None,
+    keep_existing_roles: bool = False,
 ) -> None:
-    ei.import_migration_data(
-        data,
-        workspace_record.id,
-        group_id,
-        team_id_to_workspace_id=team_id_to_workspace_id,
-    )
+    """Import in one transaction: a bad row rolls every write back. Take the run lock first."""
+    with transaction():
+        ei.import_migration_data(
+            data,
+            workspace_record.id,
+            group_id,
+            team_id_to_workspace_id=team_id_to_workspace_id,
+            keep_existing_roles=keep_existing_roles,
+        )
     ei.invalidate_home_tab_caches_for_team(workspace_record.team_id)
 
 
@@ -1187,6 +1191,7 @@ def _complete_data_migration_import(
                     client=client,
                     acting_user_id=user_id,
                     context=context,
+                    keep_existing_roles=kind in _STANDALONE_KINDS,
                 )
                 result, peer = "resumed", None
                 team_id = getattr(workspace_record, "team_id", None)
