@@ -66,16 +66,16 @@ def _database_label() -> str:
 
 
 def _information_blocks(team_id: str, context: dict | None = None) -> list[orm.BaseBlock]:
-    """Read-only install facts. Primary-only lines stay off other Workspaces."""
+    """Read-only install facts. Log level, the public URL, and the database stay on the primary Workspace."""
     lines = [
         f"Version: `{_app_version()}`",
         f"Primary Workspace: `{_primary_workspace_label()}`",
+        f"Fingerprint: `{_instance_fingerprint()}`",
     ]
     if helpers.is_primary_workspace(team_id):
         lines.extend(
             [
                 f"Log level: `{_log_level_label()}`",
-                f"Fingerprint: `{_instance_fingerprint()}`",
                 f"Public URL: `{_public_url_label(context)}`",
                 f"Database: `{_database_label()}`",
             ]
