@@ -21,6 +21,7 @@ _OPTIONS = (
 )
 _VERIFY, _REPAIR, _PURGE = (row[0] for row in _OPTIONS)
 _FAILURE_LINE = "Result: Something went wrong. Nothing more was changed. Check the logs."
+_RUNNING_LINE = "Result: Data Tools is already running. Nothing was changed. Try again in a few minutes."
 
 
 def _allowed(client: WebClient, body: dict) -> bool:
@@ -72,31 +73,22 @@ def handle_data_tools(body: dict, client: WebClient, logger: Logger, context: di
     orm.update_opened_view(client, body, trigger_id, build_data_tools_view())
 
 
-def _build_submission_token(body: dict) -> str:
-    """Token for this view submission.
-
-    Production runs the ack again before the work. The same view is that
-    repeat. A different view is another click.
-    """
-    view = body.get("view") if isinstance(body.get("view"), dict) else {}
-    user_id = helpers.get_user_id_from_body(body) or ""
-    return f"{user_id}:{view.get('id') or ''}:{view.get('hash') or ''}"
-
-
 def handle_data_tools_submit_ack(body: dict, client: WebClient, context: dict) -> dict | None:
-    """Ack phase: refuse a second run, then show the wait view."""
+    """Ack phase: refuse while a run is going, else show the wait view. The report is a DM.
+
+    The ack only reads the lock. Production runs the ack again before the work,
+    and on Lambda the two can land in different containers, so the work phase
+    takes and clears the lock.
+    """
     if not _allowed(client, body):
         return None
-    token = _build_submission_token(body)
-    current = _cache_get(_RUNNING_KEY)
-    if current and current != token:
+    if _cache_get(_RUNNING_KEY):
         return {
             "response_action": "errors",
             "errors": {
                 actions.CONFIG_DATA_TOOLS_OPTION: "Data Tools is already running. Try again in a few minutes.",
             },
         }
-    _cache_set(_RUNNING_KEY, token, ttl=_RUNNING_TTL)
     label = _option_label(_get_selected_option_value(body, actions.CONFIG_DATA_TOOLS_OPTION))
     return _wait_modal_ack(
         title="Data Tools",
@@ -107,33 +99,31 @@ def handle_data_tools_submit_ack(body: dict, client: WebClient, context: dict) -
 
 
 def handle_data_tools_submit_work(body: dict, client: WebClient, logger: Logger, context: dict) -> None:
-    """Run the chosen tool, then DM the report. The wait view stays up."""
+    """Run the chosen tool, then DM the report. A run that finds another one going reports that."""
     user_id = helpers.get_user_id_from_body(body)
     option = _get_selected_option_value(body, actions.CONFIG_DATA_TOOLS_OPTION)
     label = _option_label(option)
     workspace_name = "Workspace"
     manager = None
+    running = bool(_cache_get(_RUNNING_KEY))
+    if not running:
+        _cache_set(_RUNNING_KEY, True, ttl=_RUNNING_TTL)
     try:
         if not _allowed(client, body):
             return
         workspace_name, manager = _notice_identity(client, user_id, body, context)
-        text = _format_data_tools_notice(
-            action=label,
-            workspace_name=workspace_name,
-            manager=manager,
-            details=_run_option(option),
-        )
+        details = [_RUNNING_LINE] if running else _run_option(option)
     except Exception:
         log_error("data_tools_failed", option=option, exc_info=True)
-        text = _format_data_tools_notice(
-            action=label,
-            workspace_name=workspace_name,
-            manager=manager,
-            details=[_FAILURE_LINE],
-        )
+        details = [_FAILURE_LINE]
     finally:
-        _cache_delete(_RUNNING_KEY)
-    _dm_user(client, user_id, text)
+        if not running:
+            _cache_delete(_RUNNING_KEY)
+    _dm_user(
+        client,
+        user_id,
+        _format_data_tools_notice(action=label, workspace_name=workspace_name, manager=manager, details=details),
+    )
 
 
 def _notice_identity(client: WebClient, user_id: str | None, body: dict, context: dict) -> tuple[str, str | None]:

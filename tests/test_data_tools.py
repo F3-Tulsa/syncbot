@@ -157,21 +157,53 @@ def test_run_while_running_returns_the_error():
     assert "already running" in result["errors"]["data_tools_option"]
 
 
-def test_same_submission_is_not_already_running():
-    from helpers._cache import _cache_delete
+def test_ack_does_not_take_the_lock():
+    from helpers._cache import _cache_get
 
-    other = _body()
-    other["view"] = {**other["view"], "id": "V2", "hash": "other"}
+    with _allow():
+        first = handle_data_tools_submit_ack(_body(), MagicMock(), {})
+        again = handle_data_tools_submit_ack(_body(), MagicMock(), {})
+    assert first["response_action"] == "update"
+    assert again["response_action"] == "update"
+    assert "Close this and SyncBot will DM a report." in first["view"]["blocks"][0]["text"]["text"]
+    assert _cache_get("data_tools_running") is None
+
+
+def test_work_while_running_reports_it_and_keeps_the_lock():
+    from helpers._cache import _cache_delete, _cache_get, _cache_set
+
+    _cache_set("data_tools_running", True, ttl=900)
     try:
-        with _allow():
-            first = handle_data_tools_submit_ack(_body(), MagicMock(), {})
-            again = handle_data_tools_submit_ack(_body(), MagicMock(), {})
-            blocked = handle_data_tools_submit_ack(other, MagicMock(), {})
-        assert first["response_action"] == "update"
-        assert again["response_action"] == "update"
-        assert "already running" in blocked["errors"]["data_tools_option"]
+        with (
+            _allow(),
+            _notice_patches(),
+            patch("handlers.data_tools.run_repair") as repair,
+            _dm_text() as dm,
+        ):
+            handle_data_tools_submit_work(_body("repair"), MagicMock(), MagicMock(), {})
+        repair.assert_not_called()
+        dm.assert_called_once()
+        assert "Result: Data Tools is already running. Nothing was changed." in dm.call_args.args[2]
+        assert _cache_get("data_tools_running") is True
     finally:
         _cache_delete("data_tools_running")
+
+
+def test_work_holds_the_lock_while_it_runs():
+    from helpers._cache import _cache_get
+
+    seen = []
+
+    def _repair(*, fix):
+        seen.append(_cache_get("data_tools_running"))
+        report = MagicMock()
+        report.count.return_value = 0
+        return report
+
+    with _allow(), _notice_patches(), patch("handlers.data_tools.run_repair", side_effect=_repair), _dm_text():
+        handle_data_tools_submit_work(_body("verify"), MagicMock(), MagicMock(), {})
+    assert seen == [True]
+    assert _cache_get("data_tools_running") is None
 
 
 def test_production_repeat_of_the_ack_still_dms_the_report():
@@ -197,7 +229,6 @@ def test_production_repeat_of_the_ack_still_dms_the_report():
             app_module.main_response(body, MagicMock(), client, MagicMock(), {})
         dm.assert_called_once()
         assert "Result: No issues found. Nothing was changed." in dm.call_args.args[2]
-        client.views_update.assert_not_called()
     finally:
         _cache_delete("data_tools_running")
 
@@ -210,11 +241,7 @@ def test_run_shows_the_running_text():
         "other": "Verify",
     }
     for option, label in labels.items():
-        with (
-            _allow(),
-            patch("handlers.data_tools._cache_get", return_value=None),
-            patch("handlers.data_tools._cache_set"),
-        ):
+        with _allow(), patch("handlers.data_tools._cache_get", return_value=None):
             ack = handle_data_tools_submit_ack(_body(option), MagicMock(), {})
         assert (
             ack["view"]["blocks"][0]["text"]["text"] == f"{label} is running. Close this and SyncBot will DM a report."
@@ -224,19 +251,6 @@ def test_run_shows_the_running_text():
 
 def _dm_text():
     return patch("handlers._common.helpers.notify_user_dm")
-
-
-def test_work_does_not_update_the_view():
-    client = MagicMock()
-    with (
-        _allow(),
-        _notice_patches(),
-        patch("handlers.data_tools.run_repair") as repair,
-        _dm_text(),
-    ):
-        repair.return_value.count.return_value = 0
-        handle_data_tools_submit_work(_body(), client, MagicMock(), {})
-    client.views_update.assert_not_called()
 
 
 def test_verify_reports_every_check_when_nothing_is_found():
@@ -275,7 +289,7 @@ def test_report_is_an_action_notice():
         repair.return_value.count.return_value = 0
         handle_data_tools_submit_work(_body(), client, MagicMock(), {})
     text = dm.call_args.args[2]
-    assert "*SyncBot Action Notice*" in text
+    assert text.startswith(":toolbox: *SyncBot Action Notice*")
     inside = text.split("```", 2)[1]
     assert "Acting Manager:" in inside
     assert "Action: Verify" in inside
@@ -348,6 +362,7 @@ def test_repair_reports_what_it_fixed(real_db):
 def test_purge_reports_nothing_to_purge(real_db):
     with _allow(), _notice_patches(), _dm_text() as dm:
         handle_data_tools_submit_work(_body("purge"), MagicMock(), MagicMock(), {})
+    assert dm.call_args.args[2].startswith(":toolbox: *SyncBot Action Notice*")
     assert "Result: Nothing to purge. Nothing was changed." in dm.call_args.args[2]
     assert "Workspaces Removed: 0" in dm.call_args.args[2]
     assert "Workspaces Kept: 0" in dm.call_args.args[2]
@@ -382,9 +397,8 @@ def test_purge_reports_a_kept_workspace(real_db):
 
 
 def test_failure_sends_a_notice():
-    from helpers._cache import _cache_get, _cache_set
+    from helpers._cache import _cache_get
 
-    _cache_set("data_tools_running", True, ttl=900)
     with (
         _allow(),
         _notice_patches(),
@@ -394,7 +408,7 @@ def test_failure_sends_a_notice():
         handle_data_tools_submit_work(_body("repair"), MagicMock(), MagicMock(), {})
     dm.assert_called_once()
     text = dm.call_args.args[2]
-    assert "*SyncBot Action Notice*" in text
+    assert text.startswith(":toolbox: *SyncBot Action Notice*")
     assert "Action: Repair" in text
     assert "Result: Something went wrong. Nothing more was changed. Check the logs." in text
     assert _cache_get("data_tools_running") is None
@@ -427,17 +441,15 @@ def test_purge_now_ignores_the_retention_window(real_db):
             created_at=datetime.now(UTC).replace(tzinfo=None),
         )
     )
-    client = MagicMock()
     with (
         _allow(),
         _notice_patches(workspace),
         patch("helpers.notifications.notify_admins_dm"),
         _dm_text(),
     ):
-        handle_data_tools_submit_work(_body("purge", team_id=workspace.team_id), client, MagicMock(), {})
+        handle_data_tools_submit_work(_body("purge", team_id=workspace.team_id), MagicMock(), MagicMock(), {})
     assert DbManager.get_record(schemas.SyncChannel, id=old.id) is None
     assert DbManager.get_record(schemas.SyncChannel, id=live.id) is not None
-    client.views_update.assert_not_called()
 
 
 def test_purge_now_keeps_a_workspace_on_an_allowlist(real_db):
@@ -457,17 +469,15 @@ def test_purge_now_keeps_a_workspace_on_an_allowlist(real_db):
     DbManager.create_record(
         schemas.FederationWorkspaceAllowlist(instance_id=get_instance_id(), workspace_id=workspace.id)
     )
-    client = MagicMock()
     with (
         _allow(),
         _notice_patches(workspace),
         patch("helpers.notifications.notify_admins_dm") as dm,
         _dm_text(),
     ):
-        handle_data_tools_submit_work(_body("purge", team_id=workspace.team_id), client, MagicMock(), {})
+        handle_data_tools_submit_work(_body("purge", team_id=workspace.team_id), MagicMock(), MagicMock(), {})
     dm.assert_not_called()
     assert DbManager.get_record(schemas.Workspace, id=workspace.team_id) is not None
-    client.views_update.assert_not_called()
 
 
 def test_purge_now_omits_a_day_count():
