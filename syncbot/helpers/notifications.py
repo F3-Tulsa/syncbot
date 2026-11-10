@@ -1,6 +1,7 @@
 """Admin DM notifications and channel notifications."""
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -608,51 +609,94 @@ def notify_synced_channels(client: WebClient, channel_ids: list[str], message: s
     return notified
 
 
-def purge_stale_soft_deletes() -> int:
-    """Hard-delete ``deleted`` Channel rows past retention, then an empty Sync, then a disbanded Group with no Syncs.
+@dataclass
+class PurgeResult:
+    """Counts from one soft-delete purge."""
 
-    Workspaces soft-deleted past the same window are purged after that. Returns how many workspaces were removed.
-    Returns 0 without raising if the schema is missing.
+    workspaces_purged: int = 0
+    workspaces_kept: int = 0
+    channels_purged: int = 0
+    syncs_purged: int = 0
+    groups_disbanded: int = 0
+    workspaces_failed: int = 0
+
+
+_PURGE_CHECK_TTL = 86400
+_PURGE_BUSY_RETRY_TTL = 300
+
+
+def purge_stale_soft_deletes() -> int:
+    """Hard-delete expired rows at most once a day per process. Returns how many workspaces were removed.
+
+    Never raises: Home and keep-warm call it on the way to other work. Takes the
+    data maintenance lock, so it never overlaps Data Tools, Restore, Reset, an
+    import, or another process's purge. The one-day skip starts once this
+    process holds the lock. If the lock is busy or cannot be taken, try again in
+    five minutes. A purge that started and failed waits the full day, so a
+    half-finished run does not send its notices again every few minutes.
     """
-    from helpers.workspace import get_workspace_by_id
+    from db.run_lock import DATA_MAINTENANCE, DATA_MAINTENANCE_TTL, hold_lock
 
     cache_key = "purge_check"
     if _cache_get(cache_key):
         return 0
-    _cache_set(cache_key, True, ttl=86400)
-
     from helpers.settings import soft_delete_retention_days
 
-    retention_days = soft_delete_retention_days()
+    started = False
+    try:
+        with hold_lock(DATA_MAINTENANCE, DATA_MAINTENANCE_TTL) as token:
+            if token is None:
+                _cache_set(cache_key, True, ttl=_PURGE_BUSY_RETRY_TTL)
+                log_info("purge_stale_soft_deletes_busy", retry_seconds=_PURGE_BUSY_RETRY_TTL)
+                return 0
+            _cache_set(cache_key, True, ttl=_PURGE_CHECK_TTL)
+            started = True
+            return purge_soft_deletes(soft_delete_retention_days()).workspaces_purged
+    except ProgrammingError as e:
+        log_debug("purge_stale_soft_deletes", value=e.orig if hasattr(e, "orig") else e)
+    except Exception:
+        log_error("purge_stale_soft_deletes_failed", started=started, exc_info=True)
+    if not started:
+        _cache_set(cache_key, True, ttl=_PURGE_BUSY_RETRY_TTL)
+    return 0
+
+
+def purge_soft_deletes(retention_days: int) -> PurgeResult:
+    """Hard-delete ``deleted`` rows and workspaces older than *retention_days*.
+
+    ``0`` removes every soft-deleted row. A workspace that External Connection
+    rows still point at is counted as kept and is not announced.
+    """
+    from helpers.workspace import get_workspace_by_id
+
     # Workspace.deleted_at is timezone-aware. SyncChannel.deleted_at is stored naive.
     cutoff = datetime.now(UTC) - timedelta(days=retention_days)
     cutoff_naive = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=retention_days)
-
-    try:
-        channels_purged = _purge_expired_deleted_channels(cutoff_naive)
-    except ProgrammingError as e:
-        log_debug("purge_stale_soft_deletes", value=e.orig if hasattr(e, "orig") else e)
-        return 0
-
-    try:
-        stale_workspaces = DbManager.find_records(
-            schemas.Workspace,
-            [
-                schemas.Workspace.deleted_at.isnot(None),
-                schemas.Workspace.deleted_at < cutoff,
-            ],
-        )
-    except ProgrammingError as e:
-        log_debug("purge_stale_soft_deletes", value=e.orig if hasattr(e, "orig") else e)
-        return 0
-
+    channels_purged, syncs_purged, groups_disbanded = _purge_expired_deleted_channels(cutoff_naive)
+    result = PurgeResult(
+        channels_purged=channels_purged,
+        syncs_purged=syncs_purged,
+        groups_disbanded=groups_disbanded,
+    )
+    stale_workspaces = DbManager.find_records(
+        schemas.Workspace,
+        [
+            schemas.Workspace.deleted_at.isnot(None),
+            schemas.Workspace.deleted_at < cutoff,
+        ],
+    )
     if not stale_workspaces:
         if channels_purged:
             log_info("purge_stale_soft_deletes_complete", purged=0, sync_channels=channels_purged)
-        return 0
+        return result
 
-    purged = 0
+    from helpers.sync_cleanup import purge_workspace, workspace_has_connection_rows
+
     for ws in stale_workspaces:
+        if workspace_has_connection_rows(ws.id):
+            result.workspaces_kept += 1
+            log_info("purge_workspace_kept", workspace_id=ws.id, reason="external_connection")
+            continue
         ws_name = ws.workspace_name or ws.team_id or f"Workspace {ws.id}"
         manager_notices = _tell_other_channels_workspace_removed(ws, ws_name, retention_days)
 
@@ -686,27 +730,34 @@ def purge_stale_soft_deletes() -> int:
                     except Exception as e:
                         log_warning("purge_notify_failed", workspace_id=member.workspace_id, error=str(e))
 
-        # purge_workspace, not a bare Workspace delete: seven foreign keys across
-        # six tables still reference this row, so a parent-first delete fails on
+        # purge_workspace, not a bare Workspace delete: ten foreign keys across
+        # eight tables still reference this row, so a parent-first delete fails on
         # MySQL with error 1451 and the retention purge silently stops working.
-        from helpers.sync_cleanup import purge_workspace
-
         try:
-            purge_workspace(ws.id)
+            removed = purge_workspace(ws.id)
         except Exception as e:
-            log_error("purge_workspace_failed", workspace_id=ws.id, error=str(e))
+            log_error("purge_workspace_failed", workspace_id=ws.id, error=str(e), exc_info=True)
+            result.workspaces_failed += 1
             continue
+        if removed:
+            result.workspaces_purged += 1
 
-        purged += 1
+    if result.workspaces_purged or channels_purged or result.workspaces_kept or result.workspaces_failed:
+        log_info(
+            "purge_stale_soft_deletes_complete",
+            purged=result.workspaces_purged,
+            sync_channels=channels_purged,
+            syncs=syncs_purged,
+            groups_disbanded=groups_disbanded,
+            kept=result.workspaces_kept,
+            failed=result.workspaces_failed,
+            retention_days=retention_days,
+        )
+    return result
 
-    if purged or channels_purged:
-        log_info("purge_stale_soft_deletes_complete", purged=purged, sync_channels=channels_purged)
 
-    return purged
-
-
-def _purge_expired_deleted_channels(cutoff_naive: datetime) -> int:
-    """Hard-delete ``deleted`` rows past retention. ``uninstalled`` rows stay with their workspace."""
+def _purge_expired_deleted_channels(cutoff_naive: datetime) -> tuple[int, int, int]:
+    """Hard-delete ``deleted`` rows past retention. Returns channel, sync, and group counts."""
     expired = DbManager.find_records(
         schemas.SyncChannel,
         [
@@ -718,6 +769,7 @@ def _purge_expired_deleted_channels(cutoff_naive: datetime) -> int:
     from helpers.sync_cleanup import purge_sync, purge_sync_channels
 
     emptied: set[int] = set()
+    groups_disbanded = 0
     for row in expired:
         if not getattr(row, "id", None):
             continue
@@ -742,7 +794,8 @@ def _purge_expired_deleted_channels(cutoff_naive: datetime) -> int:
         from helpers.group_roles import _disband_group
 
         _disband_group(group_id)
-    return len(expired)
+        groups_disbanded += 1
+    return len(expired), len(emptied), groups_disbanded
 
 
 def _retention_notice(workspace_name: str, retention_days: int, sync, *, for_managers: bool) -> str:
@@ -760,7 +813,7 @@ def _retention_notice(workspace_name: str, retention_days: int, sync, *, for_man
         manager=None,
         sync_id=getattr(sync, "id", None),
         for_managers=for_managers,
-        retention_days=retention_days if for_managers else None,
+        retention_days=retention_days if for_managers and retention_days else None,
         workspace_line=sync is None,
     )
 

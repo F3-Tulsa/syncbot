@@ -663,7 +663,7 @@ def test_export_signature_names_this_install(real_db):
     assert verify_migration_signature({"version": 1, "groups": []}) is False
 
 
-def test_review_refuses_a_file_with_no_signature():
+def test_review_warns_when_a_file_has_no_signature():
     from handlers.export_import import handle_data_migration_submit_ack
 
     payload = {"version": 1, "workspace": {"team_id": "T1"}, "groups": []}
@@ -683,18 +683,30 @@ def test_review_refuses_a_file_with_no_signature():
             }
         },
     }
-    with (
-        patch("handlers.export_import._is_admin", return_value=True),
-        patch("handlers.export_import._download_uploaded_file", return_value=(json.dumps(payload), None)),
-        patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
-        patch("handlers.export_import.DbManager.find_records", return_value=[]),
-        patch("helpers._cache._cache_set") as cache_set,
-    ):
-        resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
-    assert resp["response_action"] == "errors"
-    assert "cannot check this file" in resp["errors"]["data_migration_json_input"]
-    assert "1.7.3" in resp["errors"]["data_migration_json_input"]
-    cache_set.assert_not_called()
+
+    def submit(*, enabled: bool):
+        env = {"ENABLE_UNSIGNED_IMPORT": "true" if enabled else ""}
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch("handlers.export_import._is_admin", return_value=True),
+            patch("handlers.export_import._download_uploaded_file", return_value=(json.dumps(payload), None)),
+            patch("handlers.export_import.helpers.get_workspace_record", return_value=workspace),
+            patch("handlers.export_import.DbManager.find_records", return_value=[]),
+            patch("helpers._cache._cache_set") as cache_set,
+        ):
+            return handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {}), cache_set
+
+    refused, refused_cache = submit(enabled=False)
+    assert refused["response_action"] == "errors"
+    assert "ENABLE_UNSIGNED_IMPORT" in refused["errors"]["data_migration_json_input"]
+    refused_cache.assert_not_called()
+
+    allowed, allowed_cache = submit(enabled=True)
+    assert allowed["response_action"] == "update"
+    text = json.dumps(allowed["view"])
+    assert "no signature SyncBot can check" in text
+    assert allowed["view"]["title"]["text"] == "Confirm Import"
+    allowed_cache.assert_called_once()
 
 
 def test_export_omits_a_disbanded_group_and_a_group_this_workspace_left(real_db):
@@ -1334,7 +1346,7 @@ def test_import_names_an_unknown_signer_by_id_prefix(real_db):
     from handlers.export_import import handle_data_migration_submit_ack
     from helpers.export_import import get_migration_file_status
 
-    payload, instance_id, _public = _peer_signed_file(name="Workspace A")
+    payload, instance_id, _public = _peer_signed_file(name="Secret Install")
     assert get_migration_file_status(payload)[0] == "unknown"
     local = _export_rows()
     body, text = _upload_body(payload)
@@ -1344,9 +1356,11 @@ def test_import_names_an_unknown_signer_by_id_prefix(real_db):
         patch("handlers.export_import.helpers.get_workspace_record", return_value=local),
     ):
         resp = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
-    message = resp["errors"]["data_migration_json_input"]
-    assert f"`Connection {instance_id[:8]}`" in message
-    assert "Workspace A" not in message
+    message = json.dumps(resp["view"])
+    assert resp["response_action"] == "update"
+    assert f"Connection {instance_id[:8]}" in message
+    assert "Secret Install" not in message
+    assert "not connected here" in message
 
 
 def test_connected_file_is_named_from_the_saved_connection(real_db):
@@ -1385,8 +1399,10 @@ def test_import_refuses_a_peer_that_is_not_an_active_connection(real_db):
         patch("helpers.settings.federation_enabled", return_value=True),
     ):
         refused = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
-    assert "not active" in refused["errors"]["data_migration_json_input"]
-    assert "`Partner Org`" in refused["errors"]["data_migration_json_input"]
+    refused_text = json.dumps(refused["view"])
+    assert refused["response_action"] == "update"
+    assert "not connected here" in refused_text
+    assert "`Partner Org`" in refused_text
 
     from db import DbManager, schemas
 
@@ -1402,7 +1418,8 @@ def test_import_refuses_a_peer_that_is_not_an_active_connection(real_db):
         patch("helpers.settings.federation_enabled", return_value=True),
     ):
         inactive = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
-    assert "not active" in inactive["errors"]["data_migration_json_input"]
+    assert inactive["response_action"] == "update"
+    assert "not connected here" in json.dumps(inactive["view"])
 
     DbManager.update_records(
         schemas.Instance,
@@ -1416,11 +1433,13 @@ def test_import_refuses_a_peer_that_is_not_an_active_connection(real_db):
         patch("helpers.settings.federation_enabled", return_value=False),
     ):
         off = handle_data_migration_submit_ack(body, MagicMock(token="xoxb"), {})
-    assert "Federation is off" in off["errors"]["data_migration_json_input"]
-    assert "`Partner Org`" in off["errors"]["data_migration_json_input"]
+    off_text = json.dumps(off["view"])
+    assert off["response_action"] == "update"
+    assert "not connected here" in off_text
+    assert "`Partner Org`" in off_text
 
 
-def test_finish_imports_nothing_when_the_signer_is_no_longer_trusted(real_db):
+def test_finish_imports_this_workspace_when_the_signer_is_not_connected(real_db):
     from handlers.export_import import handle_data_migration_review
 
     payload, instance_id, public_pem = _peer_signed_file()
@@ -1431,7 +1450,7 @@ def test_finish_imports_nothing_when_the_signer_is_no_longer_trusted(real_db):
         "data": payload,
         "group_id": 0,
         "workspace_id": local.id,
-        "team_id_to_workspace_id": {"TA": local.id},
+        "team_id_to_workspace_id": {"TA": local.id, "TB": 999},
         "source_name": "Partner Org",
         "source_kind": "connected",
         "source_instance_id": instance_id,
@@ -1442,13 +1461,18 @@ def test_finish_imports_nothing_when_the_signer_is_no_longer_trusted(real_db):
         patch("handlers.export_import.helpers.get_workspace_by_id", return_value=local),
         patch("helpers.settings.federation_enabled", return_value=True),
         patch("handlers.export_import._run_migration_import") as run_import,
+        patch("handlers.export_import.helpers.consider_migration_release") as release,
+        patch("handlers.export_import.helpers.restore_migrated_workspace") as restore,
+        patch("handlers.export_import.builders.refresh_home_tab_for_workspace"),
         patch("handlers.export_import.helpers.notify_user_dm") as dm,
         patch("handlers._common._close_modal_done"),
     ):
         handle_data_migration_review(body, MagicMock(), MagicMock(), {})
-    run_import.assert_not_called()
-    assert "no longer connected" in dm.call_args.args[2]
-    assert "`Partner Org`" in dm.call_args.args[2]
+    run_import.assert_called_once()
+    assert run_import.call_args.args[2] == {"TA": local.id}
+    release.assert_not_called()
+    restore.assert_called_once()
+    assert "were left out" in dm.call_args.args[2]
 
 
 def test_connected_import_writes_only_that_installs_stubs(real_db):

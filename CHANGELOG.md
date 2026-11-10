@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- version list -->
 
+## [Unreleased]
+
+### Added
+
+- Data Tools on the Primary Workspace: Verify, Repair, and Purge Soft-Deleted Data
+- Synced posts carry their post id as Slack message metadata
+
+### Changed
+
+- NOTICE: Database migration in this release; Channels from a Workspace outside their Group are removed, and SQLite stops reusing deleted ids. Back up before upgrading.
+- NOTICE: Environment change in this release; a deploy without `ENABLE_DB_RESET` turns Reset Database off. Set it in the env file to keep the button.
+- NOTICE: Environment change in this release; `ENABLE_UNSIGNED_IMPORT` stays off until set to `true`, for a file whose signature cannot be checked. Set it back to `false` after that import.
+- Data Migration import accepts a signed file from an instance that is not connected, for this Workspace only
+- Settings shows this instance's Fingerprint on every Workspace
+
+### Fixed
+
+- A failed Repair leaves the database unchanged, and an active Channel wins over an older paused duplicate
+- The retention purge, Restore, Reset Database, and Data Migration import no longer run at the same time, even on separate servers
+- A Data Migration import that fails changes nothing
+- Syncs no longer show or send to a Channel from a Workspace outside their Group, left over from an old unpublish
+- SQLite no longer reuses a deleted row's id, and enforces foreign keys like MySQL and PostgreSQL
+- Purging a Workspace removes its settings and clears it from copied messages
+- A Workspace still on an External Connection is kept until that connection drops it
 
 ## [1.7.6] - 2026-11-06
 

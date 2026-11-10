@@ -19,6 +19,19 @@ from handlers.export_import import (  # noqa: E402
 from slack import actions  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _free_run_lock():
+    """These tests have no database. The run lock is always free; tests/test_maintenance_lock.py covers busy."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _free(_name, _ttl):
+        yield "token-1"
+
+    with patch("handlers.export_import.hold_lock", side_effect=_free):
+        yield
+
+
 class TestBackupRestoreSubmitValidation:
     def test_returns_error_when_file_missing(self):
         client = MagicMock()

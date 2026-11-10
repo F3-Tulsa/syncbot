@@ -47,7 +47,9 @@ from helpers.core import (
     is_workspace_admin,
     is_workspace_manager,
     safe_get,
+    unsigned_import_enabled,
 )
+from helpers.data_repair import RepairReport, run_repair
 from helpers.encryption import decrypt_bot_token, encrypt_bot_token
 from helpers.envelope import (
     ACTION_ADD,
@@ -158,7 +160,12 @@ from helpers.slack_api import (
     update_modal,
 )
 from helpers.slack_write import slack_write_create, slack_write_delete, slack_write_edit
-from helpers.sync_cleanup import purge_sync, purge_sync_channels, purge_workspace
+from helpers.sync_cleanup import (
+    purge_sync,
+    purge_sync_channels,
+    purge_workspace,
+    workspace_has_connection_rows,
+)
 from helpers.sync_participation import (
     already_subscribed_to_source,
     channel_publishes,
@@ -357,10 +364,14 @@ __all__ = [
     "get_workspace_by_id",
     "get_bot_token",
     "get_workspace_record",
+    "workspace_has_connection_rows",
+    "run_repair",
+    "RepairReport",
     "is_request_for_team",
     "is_backup_visible_for_workspace",
     "is_settings_visible_for_workspace",
     "is_db_reset_visible_for_workspace",
+    "unsigned_import_enabled",
     "is_primary_workspace",
     "is_workspace_admin",
     "is_workspace_manager",

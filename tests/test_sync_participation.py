@@ -185,6 +185,42 @@ def test_workspace_manager_messages_name_the_workspace_and_skip_the_roster():
     assert "\nWorkspace: Workspace A" not in pause
 
 
+def test_details_go_after_the_workspace_line():
+    from helpers.sync_participation import format_action_notice
+
+    notice = format_action_notice(
+        action="Verify",
+        workspace_name="Workspace A",
+        manager="Ada Lovelace",
+        for_managers=True,
+        workspace_line=True,
+        retention_days=30,
+        note="later",
+        details=["Channels from a Workspace outside the Group: 1"],
+    )
+    body = notice.split("```", 2)[1]
+    workspace_at = body.index("Workspace: Workspace A")
+    detail_at = body.index("Channels from a Workspace outside the Group: 1")
+    retention_at = body.index("Data Retention Days: 30")
+    note_at = body.index("Note: later")
+    assert workspace_at < detail_at < retention_at < note_at
+
+
+def test_details_backticks_cannot_break_the_block():
+    from helpers.sync_participation import format_action_notice
+
+    notice = format_action_notice(
+        action="Verify",
+        workspace_name="Workspace A",
+        for_managers=True,
+        workspace_line=True,
+        details=["keep `this`"],
+    )
+    assert notice.count("```") == 2
+    assert "keep 'this'" in notice
+    assert "keep `this`" not in notice
+
+
 @pytest.fixture
 def real_db(tmp_path):
     import db as db_mod

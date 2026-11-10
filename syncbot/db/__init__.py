@@ -16,6 +16,8 @@ import os
 import sqlite3
 import ssl
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date, datetime
 from datetime import time as dt_time
 from pathlib import Path
@@ -49,6 +51,8 @@ _register_sqlite3_datetime_adapters()
 GLOBAL_ENGINE = None
 GLOBAL_SESSION = None
 GLOBAL_SCHEMA = None
+_SQLITE_FOREIGN_KEYS_ENFORCED = True
+_TX_SESSION: ContextVar = ContextVar("syncbot_db_transaction", default=None)
 
 # Maximum number of times to retry a DB operation on a transient connection error
 _MAX_RETRIES = 2
@@ -282,6 +286,52 @@ def _init_failure_message(exc: BaseException) -> str:
     )
 
 
+def _listen_sqlite_foreign_keys(engine) -> None:
+    """Turn SQLite foreign keys on for each new connection, unless startup found bad rows."""
+    from sqlalchemy import event
+
+    def _on_connect(dbapi_connection, _connection_record):
+        if not isinstance(dbapi_connection, sqlite3.Connection):
+            return
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON" if _SQLITE_FOREIGN_KEYS_ENFORCED else "PRAGMA foreign_keys=OFF")
+        finally:
+            cursor.close()
+
+    event.listen(engine, "connect", _on_connect)
+
+
+def _review_sqlite_foreign_keys() -> None:
+    """Keep enforcement off for this process when non-federation rows fail the check."""
+    global _SQLITE_FOREIGN_KEYS_ENFORCED
+
+    _SQLITE_FOREIGN_KEYS_ENFORCED = True
+    if constants.get_database_backend() != "sqlite" or GLOBAL_ENGINE is None:
+        return
+    with GLOBAL_ENGINE.connect() as conn:
+        rows = conn.execute(text("PRAGMA foreign_key_check")).fetchall()
+    federation = 0
+    other: dict[str, int] = {}
+    for row in rows:
+        table = row[0]
+        parent = row[2] if len(row) > 2 else ""
+        federation_row = (
+            str(table).startswith("federation_")
+            or table == "instances"
+            or (table == "workspaces" and parent == "instances")
+        )
+        if federation_row:
+            federation += 1
+        else:
+            other[table] = other.get(table, 0) + 1
+    if federation:
+        log_warning("sqlite_foreign_key_federation_rows", count=federation)
+    if other:
+        log_error("sqlite_foreign_key_violations", tables=other)
+        _SQLITE_FOREIGN_KEYS_ENFORCED = False
+
+
 def initialize_database() -> None:
     """Apply Alembic migrations. Does not ``CREATE DATABASE``.
 
@@ -291,6 +341,7 @@ def initialize_database() -> None:
     for attempt in range(1, _DB_INIT_MAX_ATTEMPTS + 1):
         try:
             _run_alembic_upgrade()
+            _review_sqlite_foreign_keys()
             return
         except Exception as exc:
             retryable = _is_retryable_db_error(exc)
@@ -348,6 +399,8 @@ def drop_and_init_db() -> None:
         poolclass=pool.NullPool if constants.get_database_backend() == "sqlite" else pool.QueuePool,
         pool_pre_ping=_is_network_sql_backend(),
     )
+    if constants.get_database_backend() == "sqlite":
+        _listen_sqlite_foreign_keys(engine)
 
     _drop_all_tables_dialect_aware(engine)
 
@@ -386,6 +439,7 @@ def get_engine(echo: bool = False, schema: str = None):
             poolclass=pool.NullPool,
             connect_args=connect_args,
         )
+        _listen_sqlite_foreign_keys(GLOBAL_ENGINE)
     else:
         GLOBAL_ENGINE = create_engine(
             db_url,
@@ -402,10 +456,79 @@ def get_engine(echo: bool = False, schema: str = None):
 
 
 def get_session(echo: bool = False, schema: str = None):
+    current = _TX_SESSION.get()
+    if current is not None:
+        return current
     if GLOBAL_SESSION:
         return GLOBAL_SESSION
     engine = get_engine(echo=echo, schema=schema)
     return sessionmaker(bind=engine)()
+
+
+def _in_transaction(session) -> bool:
+    return _TX_SESSION.get() is session
+
+
+@contextmanager
+def transaction():
+    """Run Database writes on one session and commit them together.
+
+    Every :class:`DbManager` call, :func:`read_session`, and
+    :func:`write_session` joins this session and does not commit on its own.
+    An exception rolls every write back. Do not open a second transaction
+    inside this one.
+    """
+    if _TX_SESSION.get() is not None:
+        raise RuntimeError("database transaction already open")
+    session = sessionmaker(bind=get_engine())()
+    token = _TX_SESSION.set(session)
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        _TX_SESSION.reset(token)
+        session.close()
+
+
+@contextmanager
+def read_session(schema: str = None):
+    """A session for reads. Joins an open :func:`transaction`; otherwise rolls back and closes."""
+    session = get_session(schema=schema)
+    joined = _in_transaction(session)
+    try:
+        yield session
+    finally:
+        if not joined:
+            session.rollback()
+            close_session(session)
+
+
+@contextmanager
+def write_session(schema: str = None):
+    """A session for writes. Joins an open :func:`transaction` (flush only);
+    otherwise commits, or rolls back on an exception, and closes."""
+    session = get_session(schema=schema)
+    joined = _in_transaction(session)
+    try:
+        yield session
+        session.flush()
+        if not joined:
+            session.commit()
+    except Exception:
+        if not joined:
+            session.rollback()
+        raise
+    finally:
+        if not joined:
+            close_session(session)
+
+
+def in_transaction() -> bool:
+    """True while a :func:`transaction` is open in this context."""
+    return _TX_SESSION.get() is not None
 
 
 def close_session(session):
@@ -427,6 +550,8 @@ def _with_retry(fn):
 
     def wrapper(*args, **kwargs):
         global GLOBAL_ENGINE
+        if _TX_SESSION.get() is not None:
+            return fn(*args, **kwargs)
         for attempt in range(_MAX_RETRIES + 1):
             try:
                 return fn(*args, **kwargs)
@@ -453,6 +578,11 @@ def _with_retry(fn):
 
 
 class DbManager:
+    """Row helpers. Each call opens, commits, and closes its own session, unless a
+    :func:`transaction` is open: then every call joins it and leaves the commit,
+    rollback, and close to the transaction.
+    """
+
     @staticmethod
     @_with_retry
     def get_record(cls: T, id, schema=None) -> T:
@@ -470,58 +600,44 @@ class DbManager:
         Integer PK lookups use :meth:`find_records` (``Model.id == n``) or
         helpers such as ``get_workspace_by_id``.
         """
-        session = get_session(schema=schema)
-        try:
+        with read_session(schema) as session:
             x = session.query(cls).filter(cls.get_id() == id).first()
             if x:
                 session.expunge(x)
             return x
-        finally:
-            session.rollback()
-            close_session(session)
 
     @staticmethod
     @_with_retry
     def find_records(cls: T, filters, schema=None) -> list[T]:
-        session = get_session(schema=schema)
-        try:
-            records = session.query(cls).filter(and_(*filters)).all()
+        with read_session(schema) as session:
+            query = session.query(cls)
+            if filters:
+                query = query.filter(and_(*filters))
+            records = query.all()
             for r in records:
                 session.expunge(r)
             return records
-        finally:
-            session.rollback()
-            close_session(session)
 
     @staticmethod
     @_with_retry
     def count_records(cls: T, filters, schema=None) -> int:
-        session = get_session(schema=schema)
-        try:
+        with read_session(schema) as session:
             return session.query(func.count(cls.id)).filter(and_(*filters)).scalar() or 0
-        finally:
-            session.rollback()
-            close_session(session)
 
     @staticmethod
     @_with_retry
     def find_join_records2(left_cls: T, right_cls: T, filters, schema=None) -> list[tuple[T]]:
-        session = get_session(schema=schema)
-        try:
+        with read_session(schema) as session:
             records = session.query(left_cls, right_cls).join(right_cls).filter(and_(*filters)).all()
             session.expunge_all()
             return records
-        finally:
-            session.rollback()
-            close_session(session)
 
     @staticmethod
     @_with_retry
     def find_join_records3(
         left_cls: T, right_cls1: T, right_cls2: T, filters, schema=None, left_join=False
     ) -> list[tuple[T]]:
-        session = get_session(schema=schema)
-        try:
+        with read_session(schema) as session:
             records = (
                 session.query(left_cls, right_cls1, right_cls2)
                 .select_from(left_cls)
@@ -532,110 +648,52 @@ class DbManager:
             )
             session.expunge_all()
             return records
-        finally:
-            session.rollback()
-            close_session(session)
 
     @staticmethod
     @_with_retry
     def update_record(cls: T, id, fields, schema=None):
-        session = get_session(schema=schema)
-        try:
+        with write_session(schema) as session:
             session.query(cls).filter(cls.get_id() == id).update(fields, synchronize_session="fetch")
-            session.flush()
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            close_session(session)
 
     @staticmethod
     @_with_retry
     def update_records(cls: T, filters, fields, schema=None):
-        session = get_session(schema=schema)
-        try:
-            count = session.query(cls).filter(and_(*filters)).update(fields, synchronize_session="fetch")
-            session.flush()
-            session.commit()
-            return count
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            close_session(session)
+        with write_session(schema) as session:
+            return session.query(cls).filter(and_(*filters)).update(fields, synchronize_session="fetch")
 
     @staticmethod
     @_with_retry
     def create_record(record: BaseClass, schema=None) -> BaseClass:
-        session = get_session(schema=schema)
-        try:
+        with write_session(schema) as session:
             session.add(record)
             session.flush()
             session.expunge(record)
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            close_session(session)
         return record
 
     @staticmethod
     @_with_retry
     def merge_record(record: BaseClass, schema=None) -> BaseClass:
         """Insert or update a record based on its primary key."""
-        session = get_session(schema=schema)
-        try:
+        with write_session(schema) as session:
             merged = session.merge(record)
             session.flush()
             session.expunge(merged)
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            close_session(session)
         return merged
 
     @staticmethod
     @_with_retry
     def create_records(records: list[BaseClass], schema=None):
-        session = get_session(schema=schema)
-        try:
+        with write_session(schema) as session:
             session.add_all(records)
-            session.flush()
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            close_session(session)
 
     @staticmethod
     @_with_retry
     def delete_record(cls: T, id, schema=None):
-        session = get_session(schema=schema)
-        try:
+        with write_session(schema) as session:
             session.query(cls).filter(cls.get_id() == id).delete()
-            session.flush()
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            close_session(session)
 
     @staticmethod
     @_with_retry
     def delete_records(cls: T, filters, schema=None):
-        session = get_session(schema=schema)
-        try:
+        with write_session(schema) as session:
             session.query(cls).filter(and_(*filters)).delete()
-            session.flush()
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            close_session(session)

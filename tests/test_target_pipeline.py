@@ -109,6 +109,7 @@ def test_no_user_token_create_uses_bot_customization_without_echo():
     assert post.call_args.kwargs["bot_token"] == "xoxb-bot"
     assert post.call_args.kwargs["user_name"] == "Ada"
     assert post.call_args.kwargs["user_profile_url"] == "https://example/icon.png"
+    assert post.call_args.kwargs["post_id"] == "P1"
     remember.assert_not_called()
 
 

@@ -291,6 +291,70 @@ class TestHostedFiles:
             post_message(bot_token="xoxb-test", channel_id="C1", msg_text="  ")
         assert slack.chat_postMessage.call_args.kwargs["text"] == ""
 
+    def test_new_post_carries_post_id_metadata(self):
+        slack = MagicMock()
+        slack.chat_postMessage.return_value = {"ts": "1.2"}
+        with patch("helpers.slack_api.WebClient", return_value=slack):
+            post_message(bot_token="xoxb-test", channel_id="C1", msg_text="hello", post_id="P1")
+        meta = slack.chat_postMessage.call_args.kwargs["metadata"]
+        assert meta == {"event_type": "syncbot_post", "event_payload": {"post_id": "P1"}}
+
+    def test_update_sends_no_metadata(self):
+        slack = MagicMock()
+        slack.chat_update.return_value = {"ts": "1.2"}
+        with patch("helpers.slack_api.WebClient", return_value=slack):
+            post_message(bot_token="xoxb-test", channel_id="C1", msg_text="hello", update_ts="1.2", post_id="P1")
+        assert "metadata" not in slack.chat_update.call_args.kwargs
+
+    def test_post_without_post_id_sends_no_metadata(self):
+        slack = MagicMock()
+        slack.chat_postMessage.return_value = {"ts": "1.2"}
+        with patch("helpers.slack_api.WebClient", return_value=slack):
+            post_message(bot_token="xoxb-test", channel_id="C1", msg_text="hello")
+        assert "metadata" not in slack.chat_postMessage.call_args.kwargs
+
+    def test_user_token_post_retries_without_metadata_once(self):
+        from slack_sdk.errors import SlackApiError
+
+        slack = MagicMock()
+        slack.chat_postMessage.side_effect = [SlackApiError("bad", {"error": "invalid_arguments"}), {"ts": "1.2"}]
+        with patch("helpers.slack_api.WebClient", return_value=slack):
+            post_message(bot_token="xoxp-user", channel_id="C1", msg_text="hello", post_id="P1")
+        assert slack.chat_postMessage.call_count == 2
+        assert "metadata" not in slack.chat_postMessage.call_args_list[1].kwargs
+
+    def test_create_sends_the_source_post_id(self):
+        from helpers.slack_write import slack_write_create
+
+        slack = MagicMock()
+        slack.chat_postMessage.return_value = {"ok": True, "ts": "10.0"}
+        workspace = MagicMock(id=2, team_id="T_TARGET")
+        channel = MagicMock(id=22, channel_id="C_TARGET", sync_id=7, subscribes=True)
+        with (
+            patch("helpers.slack_write.get_bot_token", return_value="xoxb-bot"),
+            patch("helpers.slack_write.get_user_token", return_value=None),
+            patch("helpers.slack_write.WebClient"),
+            patch("helpers.slack_api.WebClient", return_value=slack),
+            patch("helpers.workspace.get_workspace_by_id", return_value=None),
+        ):
+            slack_write_create(
+                envelope={
+                    "kind": "message",
+                    "action": "create",
+                    "post_id": "REPLY1",
+                    "thread_post_id": "PARENT1",
+                    "source_workspace_id": 1,
+                    "source_user_id": "U_SOURCE",
+                    "mapped_user_id": "U_TARGET",
+                    "user_name": "Ada",
+                    "text": "hello",
+                },
+                sync_channel=channel,
+                workspace=workspace,
+            )
+        meta = slack.chat_postMessage.call_args.kwargs["metadata"]
+        assert meta["event_payload"]["post_id"] == "REPLY1"
+
 
 class TestFederationPayloadParity:
     def test_remote_envelope_keeps_images_and_reply_broadcast(self):

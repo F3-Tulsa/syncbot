@@ -182,6 +182,16 @@ def is_db_reset_visible_for_workspace(team_id: str | None) -> bool:
     return True
 
 
+def unsigned_import_enabled() -> bool:
+    """Return True when this deploy allows a migration file with no signature.
+
+    ``ENABLE_UNSIGNED_IMPORT`` is ``true``, ``1``, or ``yes``. Unset is off.
+    Any Workspace may use it. Reads env at call time.
+    """
+    enabled = (os.environ.get(constants.ENABLE_UNSIGNED_IMPORT) or "").strip().lower()
+    return enabled in ("true", "1", "yes")
+
+
 def is_settings_visible_for_workspace(team_id: str | None) -> bool:
     """Return True if the Settings button may appear for this workspace.
 

@@ -145,8 +145,17 @@ Parameters:
 
   EnableDbReset:
     Description: >
-      Set to "true" to enable Reset Database when PRIMARY_WORKSPACE matches (ENABLE_DB_RESET). Leave empty to disable.
+      Set to "true" to enable Reset Database when PRIMARY_WORKSPACE matches (ENABLE_DB_RESET).
+      Empty or "false" turns it off. Deploy scripts do not carry it over, so a deploy without it turns it off.
       Legacy values (e.g. a Slack Team ID) are ignored by the app until updated to "true".
+    Type: String
+    Default: ""
+
+  EnableUnsignedImport:
+    Description: >
+      Set to "true" to allow Data Migration to import a file whose signature cannot be checked
+      (ENABLE_UNSIGNED_IMPORT). Any Workspace. Empty or "false" turns it off. Deploy scripts do not
+      carry it over, so a deploy without it turns it off.
     Type: String
     Default: ""
 
@@ -192,6 +201,7 @@ Conditions:
   KeepWarmEnabled: !Equals [!Ref EnableKeepWarm, "true"]
   HasPrimaryWorkspace: !Not [!Equals [!Ref PrimaryWorkspace, ""]]
   HasEnableDbReset: !Equals [!Ref EnableDbReset, "true"]
+  HasEnableUnsignedImport: !Equals [!Ref EnableUnsignedImport, "true"]
   HasDatabaseTlsExplicit: !And
     - !Condition UseRemoteDatabase
     - !Not [!Equals [!Ref DatabaseTlsEnabled, ""]]
@@ -326,6 +336,10 @@ Resources:
             - !Ref AWS::NoValue
           ENABLE_DB_RESET: !If
             - HasEnableDbReset
+            - "true"
+            - !Ref AWS::NoValue
+          ENABLE_UNSIGNED_IMPORT: !If
+            - HasEnableUnsignedImport
             - "true"
             - !Ref AWS::NoValue
           DATABASE_TLS_ENABLED: !If

@@ -50,6 +50,12 @@ PRIMARY_WORKSPACE = "PRIMARY_WORKSPACE"
 # check (env var plus PRIMARY_WORKSPACE). A UI toggle would defeat that.
 ENABLE_DB_RESET = "ENABLE_DB_RESET"
 
+# When "true"/"1"/"yes", Data Migration may import a file whose signature it
+# cannot check (an export from before 1.7.3).
+# Default off. Not limited to PRIMARY_WORKSPACE: the Workspace being moved
+# may not be the primary one. Turn it off after that import.
+ENABLE_UNSIGNED_IMPORT = "ENABLE_UNSIGNED_IMPORT"
+
 # ---------------------------------------------------------------------------
 # Operational policy — stored in the Settings modal (instance_settings table)
 #

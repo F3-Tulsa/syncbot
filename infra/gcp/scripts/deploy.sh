@@ -526,6 +526,7 @@ write_deploy_receipt() {
 - PRIMARY_WORKSPACE=${PRIMARY_WORKSPACE:-}
 - SLACK_CLIENT_ID=${SLACK_CLIENT_ID:-}
 - ENABLE_DB_RESET=${ENABLE_DB_RESET:-false}
+- ENABLE_UNSIGNED_IMPORT=${ENABLE_UNSIGNED_IMPORT:-false}
 
 ## Secrets
 - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
@@ -703,7 +704,9 @@ if [[ "${ENV_FILE_LOADED:-}" == "true" ]]; then
   [[ -n "$CLOUD_IMAGE" ]] && VARS+=("-var=cloud_run_image=$CLOUD_IMAGE")
   [[ -n "${DATABASE_USER:-}" ]] && VARS+=("-var=database_user=$DATABASE_USER")
   [[ -n "${PRIMARY_WORKSPACE:-}" ]] && VARS+=("-var=primary_workspace=$PRIMARY_WORKSPACE")
-  [[ -n "${ENABLE_DB_RESET:-}" ]] && VARS+=("-var=enable_db_reset=$ENABLE_DB_RESET")
+  # Not carried over from the last deploy: unset turns both switches off.
+  VARS+=("-var=enable_db_reset=${ENABLE_DB_RESET:-false}")
+  VARS+=("-var=enable_unsigned_import=${ENABLE_UNSIGNED_IMPORT:-false}")
   [[ -n "${DATABASE_TLS_ENABLED:-}" ]] && VARS+=("-var=database_tls_enabled=$DATABASE_TLS_ENABLED")
   [[ -n "${DATABASE_SSL_CA_PATH:-}" ]] && VARS+=("-var=database_ssl_ca_path=$DATABASE_SSL_CA_PATH")
   [[ -n "${SLACK_BOT_SCOPES:-}" ]] && VARS+=("-var=slack_bot_scopes=$SLACK_BOT_SCOPES")
@@ -951,15 +954,15 @@ LOG_LEVEL="$(prompt_log_level "$LOG_LEVEL_DEFAULT")"
 
 # Preserve optional runtime env on redeploy (Terraform defaults otherwise).
 PRIMARY_WORKSPACE_VAR=""
-ENABLE_DB_RESET_VAR=""
+# Not carried over from the last deploy: unset turns both switches off.
+ENABLE_DB_RESET_VAR="${ENABLE_DB_RESET:-false}"
+ENABLE_UNSIGNED_IMPORT_VAR="${ENABLE_UNSIGNED_IMPORT:-false}"
 DB_TLS_VAR=""
 DB_SSL_CA_VAR=""
 DB_BACKEND="${DATABASE_BACKEND:-sqlite}"
 if [[ -n "$EXISTING_SERVICE_URL" ]]; then
   DETECTED_PW="$(cloud_run_env_value "$PROJECT_ID" "$REGION" "$SERVICE_NAME" "PRIMARY_WORKSPACE")"
   PRIMARY_WORKSPACE_VAR="${DETECTED_PW:-}"
-  DETECTED_ER="$(cloud_run_env_value "$PROJECT_ID" "$REGION" "$SERVICE_NAME" "ENABLE_DB_RESET")"
-  ENABLE_DB_RESET_VAR="${DETECTED_ER:-}"
   DETECTED_DB_TLS="$(cloud_run_env_value "$PROJECT_ID" "$REGION" "$SERVICE_NAME" "DATABASE_TLS_ENABLED")"
   DB_TLS_VAR="${DETECTED_DB_TLS:-}"
   DETECTED_DB_SSL_CA="$(cloud_run_env_value "$PROJECT_ID" "$REGION" "$SERVICE_NAME" "DATABASE_SSL_CA_PATH")"
@@ -1010,6 +1013,7 @@ VARS=(
   "-var=log_level=$LOG_LEVEL"
   "-var=primary_workspace=${PRIMARY_WORKSPACE_VAR:-}"
   "-var=enable_db_reset=${ENABLE_DB_RESET_VAR:-}"
+  "-var=enable_unsigned_import=${ENABLE_UNSIGNED_IMPORT_VAR:-}"
   "-var=database_tls_enabled=${DB_TLS_VAR:-}"
   "-var=database_ssl_ca_path=${DB_SSL_CA_VAR:-}"
   "-var=database_backend=$DATABASE_BACKEND"
@@ -1045,6 +1049,11 @@ if [[ "$ENABLE_DB_RESET_VAR" == "true" ]]; then
   echo "DB reset:          enabled"
 else
   echo "DB reset:          (disabled)"
+fi
+if [[ "$ENABLE_UNSIGNED_IMPORT_VAR" == "true" ]]; then
+  echo "Unsigned import:   enabled"
+else
+  echo "Unsigned import:   (disabled)"
 fi
 echo
 echo "=== Terraform Plan ==="

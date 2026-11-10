@@ -53,6 +53,7 @@ ACTION_MAPPER = {
     actions.CONFIG_REFRESH_HOME: handlers.handle_refresh_home,
     actions.CONFIG_AUTHORIZE_SYNCBOT: handlers.handle_authorize_syncbot,
     actions.CONFIG_BACKUP_RESTORE: handlers.handle_backup_restore,
+    actions.CONFIG_DATA_TOOLS: handlers.handle_data_tools,
     actions.CONFIG_BACKUP_DOWNLOAD: handlers.handle_backup_download,
     actions.CONFIG_BACKUP_RESTORE_PROCEED: handlers.handle_backup_restore_proceed,
     actions.CONFIG_DATA_MIGRATION: handlers.handle_data_migration,
@@ -91,6 +92,7 @@ MODAL_OPEN_ACTIONS = {
     actions.CONFIG_JOIN_SYNC,
     actions.CONFIG_EDIT_SYNC,
     actions.CONFIG_BACKUP_RESTORE,
+    actions.CONFIG_DATA_TOOLS,
     actions.CONFIG_DATA_MIGRATION,
     actions.CONFIG_OPEN_SETTINGS,
     actions.CONFIG_DB_RESET,
@@ -143,6 +145,7 @@ VIEW_MAPPER = {
     actions.CONFIG_EDIT_EXTERNAL_CONNECTION_SUBMIT: handlers.handle_edit_external_connection_submit,
     actions.CONFIG_VERIFY_EXTERNAL_CONNECTION_SUBMIT: handlers.handle_verify_external_connection_submit,
     actions.CONFIG_BACKUP_RESTORE_SUBMIT: handlers.handle_backup_restore_submit_work,
+    actions.CONFIG_DATA_TOOLS_SUBMIT: handlers.handle_data_tools_submit_work,
     actions.CONFIG_DATA_MIGRATION_REVIEW: handlers.handle_data_migration_review,
 }
 """View submission ``callback_id`` -> lazy work handler (after HTTP ack)."""
@@ -153,6 +156,7 @@ VIEW_ACK_MAPPER = {
     actions.CONFIG_JOIN_SYNC_SUBMIT: handlers.handle_join_sync_submit_ack,
     actions.CONFIG_EDIT_SYNC_SUBMIT: handlers.handle_edit_sync_submit_ack,
     actions.CONFIG_BACKUP_RESTORE_SUBMIT: handlers.handle_backup_restore_submit_ack,
+    actions.CONFIG_DATA_TOOLS_SUBMIT: handlers.handle_data_tools_submit_ack,
     actions.CONFIG_DATA_MIGRATION_SUBMIT: handlers.handle_data_migration_submit_ack,
     actions.CONFIG_DATA_MIGRATION_REVIEW: handlers.handle_data_migration_review_ack,
     actions.CONFIG_CREATE_EXTERNAL_CONNECTION_SUBMIT: handlers.handle_create_external_connection_submit_ack,

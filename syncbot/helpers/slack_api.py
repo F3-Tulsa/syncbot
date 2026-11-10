@@ -310,6 +310,7 @@ def post_message(
     workspace_name: str | None = None,
     blocks: list[dict] | None = None,
     reply_broadcast: bool = False,
+    post_id: str | None = None,
 ) -> dict:
     """Post or update a message in a Slack channel."""
     slack_client = WebClient(bot_token)
@@ -348,7 +349,16 @@ def post_message(
         }
         if reply_broadcast:
             kwargs["reply_broadcast"] = True
-        res = slack_client.chat_postMessage(**kwargs)
+        if post_id:
+            kwargs["metadata"] = {"event_type": "syncbot_post", "event_payload": {"post_id": post_id}}
+        try:
+            res = slack_client.chat_postMessage(**kwargs)
+        except SlackApiError:
+            if not (post_id and str(bot_token).startswith("xoxp-") and "metadata" in kwargs):
+                raise
+            log_debug("post_metadata_dropped", channel_id=channel_id)
+            kwargs.pop("metadata", None)
+            res = slack_client.chat_postMessage(**kwargs)
     return res
 
 

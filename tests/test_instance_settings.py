@@ -214,6 +214,7 @@ class TestSettingsHandlerGate:
             patch("handlers.settings.helpers.soft_delete_retention_days", return_value=30),
             patch("handlers.settings.builders.refresh_home_tab_for_workspace"),
             patch("handlers.settings._primary_workspace_label", return_value="Workspace A"),
+            patch("handlers.settings._instance_fingerprint", return_value="aabb" + "c" * 60),
         ):
             handle_settings_submit(body, MagicMock(), MagicMock(), context={})
 
@@ -300,6 +301,7 @@ class TestSettingsFormRenders:
             patch("handlers.settings.helpers.allow_private_channels", return_value=False),
             patch("handlers.settings.helpers.extra_manager_user_ids", return_value=[]),
             patch("handlers.settings._primary_workspace_label", return_value="Workspace A"),
+            patch("handlers.settings._instance_fingerprint", return_value="aabb" + "c" * 60),
         ):
             blocks = _build_settings_form("T_OTHER").as_form_field()
 
@@ -336,14 +338,16 @@ class TestSettingsFormRenders:
         assert primary[-1]["text"]["text"] == (
             "Version: `1.7.0`\n"
             "Primary Workspace: `Workspace A`\n"
-            "Log level: `DEBUG`\n"
             f"Fingerprint: `{fingerprint}`\n"
+            "Log level: `DEBUG`\n"
             "Public URL: `https://ws-a.example`\n"
             "Database: `sqlite`"
         )
-        assert other[-1]["text"]["text"] == "Version: `1.7.0`\nPrimary Workspace: `Workspace A`"
+        assert other[-1]["text"]["text"] == (
+            f"Version: `1.7.0`\nPrimary Workspace: `Workspace A`\nFingerprint: `{fingerprint}`"
+        )
         assert "Log level:" not in other[-1]["text"]["text"]
-        assert "Fingerprint:" not in other[-1]["text"]["text"]
+        assert f"Fingerprint: `{fingerprint}`" in other[-1]["text"]["text"]
         assert "Public URL:" not in other[-1]["text"]["text"]
         assert "Database:" not in other[-1]["text"]["text"]
         assert [b["text"]["text"] for b in primary if b.get("type") == "header"][-1] == "Information"

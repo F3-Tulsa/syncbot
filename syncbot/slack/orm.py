@@ -268,6 +268,7 @@ class ButtonElement(BaseAction):
 class SelectorOption:
     name: str
     value: str
+    description: str | None = None
 
 
 def as_selector_options(names: list[str], values: list[str] | None = None) -> list[SelectorOption]:
@@ -336,10 +337,13 @@ class RadioButtonsElement(BaseElement):
         return j
 
     def __make_option(self, option: SelectorOption):
-        return {
+        payload = {
             "text": {"type": "plain_text", "text": option.name, "emoji": True},
             "value": option.value,
         }
+        if option.description:
+            payload["description"] = {"type": "plain_text", "text": option.description, "emoji": True}
+        return payload
 
 
 @dataclass

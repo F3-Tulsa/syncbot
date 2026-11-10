@@ -105,9 +105,28 @@ def purge_sync_channels(channels) -> None:
     _invalidate_channel_memberships(fanout_ids)
 
 
-def purge_workspace(workspace_id: int) -> None:
-    """Hard-delete a workspace and every row that references it, children first.
+def workspace_has_connection_rows(workspace_id: int) -> bool:
+    """True when an External Connection row still points at *workspace_id*."""
+    if not workspace_id:
+        return False
+    if DbManager.find_records(
+        schemas.FederationWorkspaceAllowlist,
+        [schemas.FederationWorkspaceAllowlist.workspace_id == workspace_id],
+    ):
+        return True
+    return bool(
+        DbManager.find_records(
+            schemas.FederationPendingStub,
+            [schemas.FederationPendingStub.workspace_id == workspace_id],
+        )
+    )
 
+
+def purge_workspace(workspace_id: int) -> bool:
+    """Hard-delete a workspace after its non-federation references are gone.
+
+    Returns False, and deletes nothing, while an allowlist or pending-stub row
+    still points at the workspace. A later run purges it once those rows are gone.
     Groups deliberately survive. Membership rows need two different operations
     because ``workspace_group_members`` points at ``workspaces.id`` through two
     columns: rows where this workspace is the *member* are deleted, while rows
@@ -116,7 +135,10 @@ def purge_workspace(workspace_id: int) -> None:
     another workspace's legitimate member.
     """
     if not workspace_id:
-        return
+        return False
+    if workspace_has_connection_rows(workspace_id):
+        log_info("purge_workspace_kept_for_connection", workspace_id=workspace_id)
+        return False
 
     # Purge only this workspace's SyncChannels — participation owns publishing.
     # Do not delete whole Syncs because a leftover publisher_workspace_id matched.
@@ -158,6 +180,16 @@ def purge_workspace(workspace_id: int) -> None:
         [schemas.WorkspaceGroupMember.invited_by_workspace_id == workspace_id],
         {schemas.WorkspaceGroupMember.invited_by_workspace_id: None},
     )
+    DbManager.delete_records(
+        schemas.WorkspaceSetting,
+        [schemas.WorkspaceSetting.workspace_id == workspace_id],
+    )
+    DbManager.update_records(
+        schemas.PostMeta,
+        [schemas.PostMeta.source_workspace_id == workspace_id],
+        {schemas.PostMeta.source_workspace_id: None},
+    )
+    _cache_delete_prefix(f"workspace_setting:{workspace_id}:")
 
     # delete_record(Workspace, ...) would filter on team_id, not id.
     DbManager.delete_records(schemas.Workspace, [schemas.Workspace.id == workspace_id])
@@ -172,3 +204,4 @@ def purge_workspace(workspace_id: int) -> None:
         succeed_ownership(group_id, departing_workspace_id=workspace_id)
 
     log_info("workspace_purged", workspace_id=workspace_id, sync_channels=len(own_channels))
+    return True

@@ -45,6 +45,13 @@ _DATETIME_COLUMNS = frozenset(
 )
 
 
+def _is_lock_key(key: str | None) -> bool:
+    """A run lock from ``db.run_lock``. It belongs to a process, not to the data."""
+    from db.run_lock import LOCK_PREFIX
+
+    return bool(key) and key.startswith(LOCK_PREFIX)
+
+
 def _dump_raw_table(table_name: str) -> list[dict]:
     """Return all rows from a non-ORM table as dictionaries (dialect-neutral via reflection)."""
     engine = get_engine()
@@ -165,6 +172,8 @@ def build_full_backup() -> dict:
         if table_name in _EPHEMERAL_BACKUP_TABLES:
             continue
         records = DbManager.find_records(cls, [])
+        if table_name == "instance_settings":
+            records = [row for row in records if not _is_lock_key(row.key)]
         payload[table_name] = _records_to_list(records, cls)
     for table_name in _RAW_BACKUP_TABLES:
         payload[table_name] = _dump_raw_table(table_name)
@@ -263,6 +272,8 @@ def restore_full_backup(
             if table_name == "workspace_settings" and row.get("key") == "last_auto_match":
                 row = {**row, "key": "last_auto_map"}
             if table_name == "instance_settings" and row.get("key") == constants.SETTING_PUBLIC_BASE_URL:
+                continue
+            if table_name == "instance_settings" and _is_lock_key(row.get("key")):
                 continue
             kwargs = {}
             for k, v in row.items():
@@ -619,9 +630,9 @@ def format_migration_source_name(instance_id: str, row=None) -> str:
 def get_migration_file_status(data: dict) -> tuple[str, object | None]:
     """Classify a migration file before Import will accept it.
 
-    ``unchecked`` has no signature. ``tampered`` has a signature that does not
-    check. ``this_install`` and ``connected`` may be imported. Anything else
-    is refused. The self row is trusted, so it is checked before a peer.
+    ``unchecked`` has no signature SyncBot can check. ``tampered`` has a
+    signature that does not check and is refused. The self row is trusted, so
+    it is checked before a peer.
     """
     from helpers.settings import federation_enabled
     from helpers.workspace_kind import is_self_instance, peer_is_trusted
@@ -676,7 +687,7 @@ def _workspace_is_active_group_member(group_id: int, workspace_id: int) -> bool:
     return bool(rows)
 
 
-def _ensure_group_membership(group_id: int, workspace_id: int, *, role, now) -> None:
+def _ensure_group_membership(group_id: int, workspace_id: int, *, role, now, apply_role: bool = True) -> None:
     from helpers.group_roles import upsert_group_membership
 
     upsert_group_membership(
@@ -684,8 +695,26 @@ def _ensure_group_membership(group_id: int, workspace_id: int, *, role, now) -> 
         workspace_id,
         role=role if role is not None else "",
         now=now,
-        apply_role=True,
+        apply_role=apply_role,
     )
+
+
+def _parse_directory_rows(rows: list, now: datetime) -> list[dict]:
+    """Check every directory row before the import replaces the directory. Raises on a bad row."""
+    parsed = []
+    for row in rows:
+        updated_at = row.get("updated_at")
+        parsed.append(
+            {
+                "slack_user_id": row["slack_user_id"],
+                "email": row.get("email"),
+                "real_name": row.get("real_name"),
+                "display_name": row.get("display_name"),
+                "normalized_name": row.get("normalized_name"),
+                "updated_at": datetime.fromisoformat(updated_at.replace("Z", "+00:00")) if updated_at else now,
+            }
+        )
+    return parsed
 
 
 def import_migration_data(
@@ -694,14 +723,22 @@ def import_migration_data(
     group_id: int | None = None,
     *,
     team_id_to_workspace_id: dict[str, int],
+    keep_existing_roles: bool = False,
 ) -> None:
-    """Merge migration data by stable group/sync uid without creating live workspaces."""
+    """Merge migration data by stable group/sync uid without creating live workspaces.
+
+    With *keep_existing_roles*, a Group that already exists here keeps this
+    Workspace's current role; the file sets a role only on a Group the import
+    creates. A file nothing here vouches for must not make its Workspace an owner.
+
+    Run it inside :func:`db.transaction` so a bad row rolls the whole import back.
+    """
     syncs_export = data.get("syncs", [])
     sync_channels_export = data.get("sync_channels", [])
     post_meta_export = data.get("post_meta", {})
-    user_directory_export = data.get("user_directory", [])
     user_mappings_export = data.get("user_mappings", [])
     now = datetime.now(UTC)
+    directory_rows = _parse_directory_rows(data.get("user_directory", []), now)
     this_workspace = get_workspace_by_id(workspace_id)
     if this_workspace and this_workspace.team_id:
         from helpers.workspace_kind import convert_workspace_to_local
@@ -738,7 +775,13 @@ def import_migration_data(
             )
         group_uid_to_id[uid] = group.id
         this_role = group_entry.get("role") or "member"
-        _ensure_group_membership(group.id, workspace_id, role=this_role, now=now)
+        _ensure_group_membership(
+            group.id,
+            workspace_id,
+            role=this_role,
+            now=now,
+            apply_role=creating or not keep_existing_roles,
+        )
         if creating:
             continue
         named_members = group_entry.get("member_workspaces") or []
@@ -890,20 +933,8 @@ def import_migration_data(
         schemas.UserDirectory,
         [schemas.UserDirectory.workspace_id == workspace_id],
     )
-    for u in user_directory_export:
-        DbManager.create_record(
-            schemas.UserDirectory(
-                workspace_id=workspace_id,
-                slack_user_id=u["slack_user_id"],
-                email=u.get("email"),
-                real_name=u.get("real_name"),
-                display_name=u.get("display_name"),
-                normalized_name=u.get("normalized_name"),
-                updated_at=datetime.fromisoformat(u["updated_at"].replace("Z", "+00:00"))
-                if u.get("updated_at")
-                else datetime.now(UTC),
-            )
-        )
+    for row in directory_rows:
+        DbManager.create_record(schemas.UserDirectory(workspace_id=workspace_id, **row))
 
     # user_mappings where both source and target workspace exist on B
     for um in user_mappings_export:

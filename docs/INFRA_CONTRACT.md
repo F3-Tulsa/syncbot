@@ -59,7 +59,8 @@ The application reads configuration from environment variables. Providers must i
 | `SlackOauthUserScopes` / `slack_user_scopes` | `SLACK_USER_SCOPES` | Defaults match `USER_SCOPES` |
 | `LogLevel` / `log_level` | `LOG_LEVEL` | |
 | `PrimaryWorkspace` / `primary_workspace` | `PRIMARY_WORKSPACE` | Hidden Backup/Restore until set **and redeployed**. AWS `--setup-github` copies it when it is set in the env file. |
-| `EnableDbReset` / `enable_db_reset` | `ENABLE_DB_RESET` | Boolean; also gated by `PRIMARY_WORKSPACE` |
+| `EnableDbReset` / `enable_db_reset` | `ENABLE_DB_RESET` | Boolean; also gated by `PRIMARY_WORKSPACE`. A deploy without it turns Reset Database off. |
+| `EnableUnsignedImport` / `enable_unsigned_import` | `ENABLE_UNSIGNED_IMPORT` | Boolean. Any Workspace. Default off. A deploy without it turns the import off. |
 | `DatabaseTlsEnabled` / `DatabaseSslCaPath` (and TF equivalents) | `DATABASE_TLS_*` | Omit when empty so app defaults apply |
 | `DatabaseBackend=mysql` / `postgresql` + `DatabaseHost` / port / user / password / schema | `DATABASE_*` | Deploy scripts map `DATABASE_HOST`, `DATABASE_USER`, `DATABASE_PASSWORD`, `DATABASE_SCHEMA` |
 | `DatabaseBackend=sqlite` (AWS) | `DATABASE_BACKEND=sqlite`, `DATABASE_URL=sqlite:////tmp/syncbot.db` | `LITESTREAM_S3_BUCKET` wrapper-only |
@@ -74,7 +75,8 @@ Deploy-only warmth knobs are **not** app runtime env: **`GCP_CLOUD_RUN_MIN_INSTA
 |----------|-------------|
 | `SLACK_BOT_TOKEN` | Set by OAuth flow; placeholder until first install. |
 | `PRIMARY_WORKSPACE` | Slack Team ID of the primary workspace. Required for backup/restore to be visible. DB reset (if enabled) is also scoped to this workspace. |
-| `ENABLE_DB_RESET` | When `true` / `1` / `yes` and `PRIMARY_WORKSPACE` matches the current workspace, shows the Reset Database button. Not prompted during deploy; set it in the env file (AWS `--setup-github` copies it when present), or in SAM / Terraform. |
+| `ENABLE_DB_RESET` | When `true` / `1` / `yes` and `PRIMARY_WORKSPACE` matches the current workspace, shows the Reset Database button. A deploy without it turns the button off. Set it in the env file to keep it (AWS `--setup-github` copies it when present), or in SAM / Terraform. |
+| `ENABLE_UNSIGNED_IMPORT` | When `true` / `1` / `yes`, Data Migration can import a file whose signature cannot be checked, on any Workspace. Default off. A deploy without it turns that import off. Set it in the env file for the move, then set it to `false` and redeploy. |
 | `LOCAL_DEVELOPMENT` | `true` only for local dev; disables token verification and enables dev shortcuts. |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (default `INFO`). DEBUG includes `log_debug()` events (skip, `workspace_convert`, `teams_convert`, missing bot token, pipeline fan-out, file share ts, `/teams`). `log_info()` covers migration export/import and pair. |
 | `PORT` | HTTP listen port for container entrypoint (`python app.py` / Cloud Run). Cloud Run injects this (typically `8080`); default `3000` when unset. |
@@ -89,7 +91,7 @@ Instance-wide fields appear only when `PRIMARY_WORKSPACE` is set and matches the
 
 Private Channels and writes as a mapped person need per-user authorization, which is not a configuration value and needs no new environment variable. Slack will not let an app add itself to a private Channel. Target messages, files, and native reactions use the mapped person's user token for that target workspace when it is available; message and file writes otherwise fall back to the workspace bot token with author customization, while reaction behavior follows the selected Hybrid, Direct, or Off type. SyncBot never uses another member's token and never sends a user token over federation. Those tokens come from the OAuth install this instance already serves and are stored by Bolt in `slack_installations`; the **Authorize SyncBot** button on the Home tab is that same install flow for one more person.
 
-`PRIMARY_WORKSPACE` and `ENABLE_DB_RESET` stay environment-only: they decide which workspace sees instance Settings fields, Backup/Restore, and Reset Database, so they should only be changeable by whoever can deploy the instance.
+`PRIMARY_WORKSPACE`, `ENABLE_DB_RESET`, and `ENABLE_UNSIGNED_IMPORT` stay environment-only. The first two decide which workspace sees instance Settings fields, Backup/Restore, and Reset Database. `ENABLE_UNSIGNED_IMPORT` allows a migration file whose signature cannot be checked, on any Workspace. Whoever can deploy the instance is the person who can change them.
 
 ## Platform Capabilities
 
