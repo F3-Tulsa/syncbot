@@ -42,6 +42,18 @@ def _parse_private_metadata(body: dict) -> dict:
 
 
 _DM_WAIT_TEXT = "You can close this now. SyncBot will DM you when complete."
+_MAINTENANCE_BUSY_TEXT = "A maintenance action is already in progress. Try again in a few minutes."
+"""Shown when the run lock (``db.run_lock.DATA_MAINTENANCE``) is held."""
+
+
+def _is_ack_replay(context: dict | None) -> bool:
+    """True when ``main_response`` runs a view ack again after ``view_ack`` already answered Slack.
+
+    Skip side effects such as logs there, so one submit logs once.
+    """
+    return bool(context and context.get("view_ack_replay"))
+
+
 _STAY_WAIT_TEXT = "Please wait for this to complete."
 
 

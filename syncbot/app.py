@@ -416,6 +416,8 @@ def main_response(body: dict, logger, client, ack, context: dict) -> None:
 
     if request_type == "view_submission":
         ack_handler = VIEW_ACK_MAPPER.get(request_id)
+        if ack_handler and not LOCAL_DEVELOPMENT:
+            context["view_ack_replay"] = True
         result = ack_handler(body, client, context) if ack_handler else None
         if isinstance(result, dict) and result.get("response_action") == "errors":
             if LOCAL_DEVELOPMENT:

@@ -1,6 +1,7 @@
 """Data Tools is limited to an admin on the primary Workspace."""
 
 import os
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -66,6 +67,43 @@ def _body(option="verify", team_id="TPRIMARY"):
             },
         },
     }
+
+
+@pytest.fixture(autouse=True)
+def _fake_lock(request):
+    """Tests without a database get a lock that is always free. ``real_db`` tests use the real one."""
+    if "real_db" in request.fixturenames:
+        yield None
+        return
+    held = {"entered": 0, "exited": 0}
+
+    @contextmanager
+    def _free(_name, _ttl):
+        held["entered"] += 1
+        try:
+            yield "token-1"
+        finally:
+            held["exited"] += 1
+
+    with (
+        patch("handlers.data_tools.hold_lock", side_effect=_free),
+        patch("handlers.data_tools.is_lock_held", return_value=False),
+    ):
+        yield held
+
+
+def _hold_lock():
+    from db.run_lock import DATA_MAINTENANCE, DATA_MAINTENANCE_TTL, acquire_lock
+
+    token = acquire_lock(DATA_MAINTENANCE, DATA_MAINTENANCE_TTL)
+    assert token
+    return token
+
+
+def _lock_is_held():
+    from db.run_lock import DATA_MAINTENANCE, DATA_MAINTENANCE_TTL, is_lock_held
+
+    return is_lock_held(DATA_MAINTENANCE, DATA_MAINTENANCE_TTL)
 
 
 def _allow(admin=True, primary=True):
@@ -152,27 +190,76 @@ def test_purge_description_fits_slack():
 
 
 def test_run_while_running_returns_the_error():
-    with _allow(), patch("handlers.data_tools._cache_get", return_value=True):
+    with _allow(), patch("handlers.data_tools.is_lock_held", return_value=True):
         result = handle_data_tools_submit_ack(_body(), MagicMock(), {})
-    assert "already running" in result["errors"]["data_tools_option"]
+    assert "A maintenance action is already in progress." in result["errors"]["data_tools_option"]
 
 
-def test_ack_does_not_take_the_lock():
-    from helpers._cache import _cache_get
+def test_ack_shows_the_wait_view_when_the_lock_cannot_be_read():
+    with (
+        _allow(),
+        patch("handlers.data_tools.is_lock_held", side_effect=RuntimeError("db down")),
+        patch("handlers.data_tools.log_warning") as log_warning,
+    ):
+        result = handle_data_tools_submit_ack(_body(), MagicMock(), {})
+    assert result["response_action"] == "update"
+    assert log_warning.call_args.args[0] == "data_tools_lock_read_failed"
 
+
+def test_ack_replay_does_not_log_busy_again():
+    with (
+        _allow(),
+        patch("handlers.data_tools.is_lock_held", return_value=True),
+        patch("handlers.data_tools.log_info") as log_info,
+    ):
+        first = handle_data_tools_submit_ack(_body(), MagicMock(), {})
+        replay = handle_data_tools_submit_ack(_body(), MagicMock(), {"view_ack_replay": True})
+    assert first == replay
+    assert [call.args[0] for call in log_info.call_args_list] == ["data_tools_busy"]
+
+
+def test_production_marks_the_ack_replay():
+    import app as app_module
+
+    body = _body()
+    body["type"] = "view_submission"
+    body["view"]["callback_id"] = "data_tools_submit"
+    seen = []
+    with (
+        patch.dict(app_module.VIEW_ACK_MAPPER, {"data_tools_submit": lambda b, c, ctx: seen.append(dict(ctx))}),
+        patch.dict(app_module.MAIN_MAPPER, {"view_submission": {}}),
+        patch.object(app_module, "LOCAL_DEVELOPMENT", False),
+    ):
+        app_module.main_response(body, MagicMock(), MagicMock(), MagicMock(), {})
+    assert seen == [{"view_ack_replay": True}]
+
+
+def test_ack_does_not_take_the_lock(real_db):
     with _allow():
         first = handle_data_tools_submit_ack(_body(), MagicMock(), {})
         again = handle_data_tools_submit_ack(_body(), MagicMock(), {})
     assert first["response_action"] == "update"
     assert again["response_action"] == "update"
     assert "Close this and SyncBot will DM a report." in first["view"]["blocks"][0]["text"]["text"]
-    assert _cache_get("data_tools_running") is None
+    assert _lock_is_held() is False
 
 
-def test_work_while_running_reports_it_and_keeps_the_lock():
-    from helpers._cache import _cache_delete, _cache_get, _cache_set
+def test_ack_refuses_while_another_process_holds_the_lock(real_db):
+    from db.run_lock import DATA_MAINTENANCE, release_lock
 
-    _cache_set("data_tools_running", True, ttl=900)
+    token = _hold_lock()
+    try:
+        with _allow():
+            result = handle_data_tools_submit_ack(_body(), MagicMock(), {})
+        assert "A maintenance action is already in progress." in result["errors"]["data_tools_option"]
+    finally:
+        release_lock(DATA_MAINTENANCE, token)
+
+
+def test_work_while_running_reports_it_and_keeps_the_lock(real_db):
+    from db.run_lock import DATA_MAINTENANCE, release_lock
+
+    token = _hold_lock()
     try:
         with (
             _allow(),
@@ -183,19 +270,17 @@ def test_work_while_running_reports_it_and_keeps_the_lock():
             handle_data_tools_submit_work(_body("repair"), MagicMock(), MagicMock(), {})
         repair.assert_not_called()
         dm.assert_called_once()
-        assert "Result: Data Tools is already running. Nothing was changed." in dm.call_args.args[2]
-        assert _cache_get("data_tools_running") is True
+        assert "Result: A maintenance action is already in progress. Nothing was changed." in dm.call_args.args[2]
+        assert _lock_is_held() is True
     finally:
-        _cache_delete("data_tools_running")
+        release_lock(DATA_MAINTENANCE, token)
 
 
-def test_work_holds_the_lock_while_it_runs():
-    from helpers._cache import _cache_get
-
+def test_work_holds_the_lock_while_it_runs(real_db):
     seen = []
 
     def _repair(*, fix):
-        seen.append(_cache_get("data_tools_running"))
+        seen.append(_lock_is_held())
         report = MagicMock()
         report.count.return_value = 0
         return report
@@ -203,34 +288,54 @@ def test_work_holds_the_lock_while_it_runs():
     with _allow(), _notice_patches(), patch("handlers.data_tools.run_repair", side_effect=_repair), _dm_text():
         handle_data_tools_submit_work(_body("verify"), MagicMock(), MagicMock(), {})
     assert seen == [True]
-    assert _cache_get("data_tools_running") is None
+    assert _lock_is_held() is False
+
+
+def test_a_failed_run_releases_the_lock(real_db):
+    with (
+        _allow(),
+        _notice_patches(),
+        patch("handlers.data_tools.run_repair", side_effect=RuntimeError("boom")),
+        _dm_text(),
+    ):
+        handle_data_tools_submit_work(_body("repair"), MagicMock(), MagicMock(), {})
+    assert _lock_is_held() is False
+
+
+def test_a_lock_failure_before_purge_says_nothing_was_changed():
+    with (
+        _allow(),
+        _notice_patches(),
+        patch("handlers.data_tools.hold_lock", side_effect=RuntimeError("db down")),
+        patch("handlers.data_tools.purge_soft_deletes") as purge,
+        _dm_text() as dm,
+    ):
+        handle_data_tools_submit_work(_body("purge"), MagicMock(), MagicMock(), {})
+    purge.assert_not_called()
+    assert "Result: Something went wrong. Nothing was changed. Check the logs." in dm.call_args.args[2]
 
 
 def test_production_repeat_of_the_ack_still_dms_the_report():
     import app as app_module
-    from helpers._cache import _cache_delete
 
     body = _body()
     body["type"] = "view_submission"
     body["view"]["callback_id"] = "data_tools_submit"
     body["view"]["hash"] = "hash-1"
     client = MagicMock()
-    try:
-        with (
-            _allow(),
-            _notice_patches(),
-            patch("handlers.data_tools.run_repair") as repair,
-            _dm_text() as dm,
-            patch.object(app_module, "LOCAL_DEVELOPMENT", False),
-            patch.object(app_module, "emit_metric"),
-        ):
-            repair.return_value.count.return_value = 0
-            handle_data_tools_submit_ack(body, client, {})
-            app_module.main_response(body, MagicMock(), client, MagicMock(), {})
-        dm.assert_called_once()
-        assert "Result: No issues found. Nothing was changed." in dm.call_args.args[2]
-    finally:
-        _cache_delete("data_tools_running")
+    with (
+        _allow(),
+        _notice_patches(),
+        patch("handlers.data_tools.run_repair") as repair,
+        _dm_text() as dm,
+        patch.object(app_module, "LOCAL_DEVELOPMENT", False),
+        patch.object(app_module, "emit_metric"),
+    ):
+        repair.return_value.count.return_value = 0
+        handle_data_tools_submit_ack(body, client, {})
+        app_module.main_response(body, MagicMock(), client, MagicMock(), {})
+    dm.assert_called_once()
+    assert "Result: No issues found. Nothing was changed." in dm.call_args.args[2]
 
 
 def test_run_shows_the_running_text():
@@ -241,7 +346,7 @@ def test_run_shows_the_running_text():
         "other": "Verify",
     }
     for option, label in labels.items():
-        with _allow(), patch("handlers.data_tools._cache_get", return_value=None):
+        with _allow(), patch("handlers.data_tools.is_lock_held", return_value=False):
             ack = handle_data_tools_submit_ack(_body(option), MagicMock(), {})
         assert (
             ack["view"]["blocks"][0]["text"]["text"] == f"{label} is running. Close this and SyncBot will DM a report."
@@ -396,9 +501,7 @@ def test_purge_reports_a_kept_workspace(real_db):
     assert DbManager.get_record(schemas.Workspace, id=workspace.team_id) is not None
 
 
-def test_failure_sends_a_notice():
-    from helpers._cache import _cache_get
-
+def test_failure_sends_a_notice(_fake_lock):
     with (
         _allow(),
         _notice_patches(),
@@ -410,8 +513,83 @@ def test_failure_sends_a_notice():
     text = dm.call_args.args[2]
     assert text.startswith(":toolbox: *SyncBot Action Notice*")
     assert "Action: Repair" in text
-    assert "Result: Something went wrong. Nothing more was changed. Check the logs." in text
-    assert _cache_get("data_tools_running") is None
+    assert "Result: Something went wrong. Nothing was changed. Check the logs." in text
+    assert _fake_lock == {"entered": 1, "exited": 1}
+
+
+def test_purge_failure_says_data_may_be_removed():
+    with (
+        _allow(),
+        _notice_patches(),
+        patch("handlers.data_tools.purge_soft_deletes", side_effect=RuntimeError("boom")),
+        _dm_text() as dm,
+    ):
+        handle_data_tools_submit_work(_body("purge"), MagicMock(), MagicMock(), {})
+    text = dm.call_args.args[2]
+    assert "Action: Purge Soft-Deleted Data" in text
+    assert "Result: Something went wrong. Some data may already be removed. Check the logs." in text
+    assert "Nothing was changed" not in text
+
+
+def test_purge_reports_a_workspace_it_could_not_remove():
+    from helpers.notifications import PurgeResult
+
+    result = PurgeResult(channels_purged=2, workspaces_failed=1)
+    with (
+        _allow(),
+        _notice_patches(),
+        patch("handlers.data_tools.purge_soft_deletes", return_value=result),
+        _dm_text() as dm,
+    ):
+        handle_data_tools_submit_work(_body("purge"), MagicMock(), MagicMock(), {})
+    text = dm.call_args.args[2]
+    assert "Workspaces Failed: 1" in text
+    assert "Result: Removed 2 rows. 1 Workspace could not be removed. Check the logs." in text
+
+
+def test_a_run_logs_start_and_finish():
+    from helpers.data_repair import RepairReport
+
+    with (
+        _allow(),
+        _notice_patches(),
+        patch("handlers.data_tools.run_repair", return_value=RepairReport(counts={})),
+        patch("handlers.data_tools.log_info") as log_info,
+        _dm_text(),
+    ):
+        handle_data_tools_submit_work(_body("verify"), MagicMock(), MagicMock(), {})
+    events = [call.args[0] for call in log_info.call_args_list]
+    assert events == ["data_tools_started", "data_tools_finished"]
+    finished = log_info.call_args_list[1].kwargs
+    assert finished["option"] == "verify"
+    assert finished["result"] == "Result: No issues found. Nothing was changed."
+    assert "duration_ms" in finished
+
+
+def test_a_failed_run_logs_the_error():
+    with (
+        _allow(),
+        _notice_patches(),
+        patch("handlers.data_tools.run_repair", side_effect=RuntimeError("boom")),
+        patch("handlers.data_tools.log_error") as log_error,
+        _dm_text(),
+    ):
+        handle_data_tools_submit_work(_body("repair"), MagicMock(), MagicMock(), {})
+    log_error.assert_called_once()
+    assert log_error.call_args.args[0] == "data_tools_failed"
+    assert log_error.call_args.kwargs["option"] == "repair"
+    assert log_error.call_args.kwargs["exc_info"] is True
+
+
+def test_a_refused_run_logs_a_warning():
+    with (
+        patch("handlers.data_tools._allowed", return_value=False),
+        patch("handlers.data_tools.log_warning") as log_warning,
+        _dm_text() as dm,
+    ):
+        handle_data_tools_submit_work(_body("purge"), MagicMock(), MagicMock(), {})
+    dm.assert_not_called()
+    assert log_warning.call_args.args[0] == "data_tools_refused"
 
 
 def test_purge_now_ignores_the_retention_window(real_db):

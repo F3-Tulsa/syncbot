@@ -618,21 +618,47 @@ class PurgeResult:
     channels_purged: int = 0
     syncs_purged: int = 0
     groups_disbanded: int = 0
+    workspaces_failed: int = 0
+
+
+_PURGE_CHECK_TTL = 86400
+_PURGE_BUSY_RETRY_TTL = 300
 
 
 def purge_stale_soft_deletes() -> int:
-    """Hard-delete expired rows at most once a day. Returns how many workspaces were removed."""
+    """Hard-delete expired rows at most once a day per process. Returns how many workspaces were removed.
+
+    Never raises: Home and keep-warm call it on the way to other work. Takes the
+    data maintenance lock, so it never overlaps Data Tools, Restore, Reset, an
+    import, or another process's purge. The one-day skip starts once this
+    process holds the lock. If the lock is busy or cannot be taken, try again in
+    five minutes. A purge that started and failed waits the full day, so a
+    half-finished run does not send its notices again every few minutes.
+    """
+    from db.run_lock import DATA_MAINTENANCE, DATA_MAINTENANCE_TTL, hold_lock
+
     cache_key = "purge_check"
     if _cache_get(cache_key):
         return 0
-    _cache_set(cache_key, True, ttl=86400)
     from helpers.settings import soft_delete_retention_days
 
+    started = False
     try:
-        return purge_soft_deletes(soft_delete_retention_days()).workspaces_purged
+        with hold_lock(DATA_MAINTENANCE, DATA_MAINTENANCE_TTL) as token:
+            if token is None:
+                _cache_set(cache_key, True, ttl=_PURGE_BUSY_RETRY_TTL)
+                log_info("purge_stale_soft_deletes_busy", retry_seconds=_PURGE_BUSY_RETRY_TTL)
+                return 0
+            _cache_set(cache_key, True, ttl=_PURGE_CHECK_TTL)
+            started = True
+            return purge_soft_deletes(soft_delete_retention_days()).workspaces_purged
     except ProgrammingError as e:
         log_debug("purge_stale_soft_deletes", value=e.orig if hasattr(e, "orig") else e)
-        return 0
+    except Exception:
+        log_error("purge_stale_soft_deletes_failed", started=started, exc_info=True)
+    if not started:
+        _cache_set(cache_key, True, ttl=_PURGE_BUSY_RETRY_TTL)
+    return 0
 
 
 def purge_soft_deletes(retention_days: int) -> PurgeResult:
@@ -669,6 +695,7 @@ def purge_soft_deletes(retention_days: int) -> PurgeResult:
     for ws in stale_workspaces:
         if workspace_has_connection_rows(ws.id):
             result.workspaces_kept += 1
+            log_info("purge_workspace_kept", workspace_id=ws.id, reason="external_connection")
             continue
         ws_name = ws.workspace_name or ws.team_id or f"Workspace {ws.id}"
         manager_notices = _tell_other_channels_workspace_removed(ws, ws_name, retention_days)
@@ -709,16 +736,22 @@ def purge_soft_deletes(retention_days: int) -> PurgeResult:
         try:
             removed = purge_workspace(ws.id)
         except Exception as e:
-            log_error("purge_workspace_failed", workspace_id=ws.id, error=str(e))
+            log_error("purge_workspace_failed", workspace_id=ws.id, error=str(e), exc_info=True)
+            result.workspaces_failed += 1
             continue
         if removed:
             result.workspaces_purged += 1
 
-    if result.workspaces_purged or channels_purged:
+    if result.workspaces_purged or channels_purged or result.workspaces_kept or result.workspaces_failed:
         log_info(
             "purge_stale_soft_deletes_complete",
             purged=result.workspaces_purged,
             sync_channels=channels_purged,
+            syncs=syncs_purged,
+            groups_disbanded=groups_disbanded,
+            kept=result.workspaces_kept,
+            failed=result.workspaces_failed,
+            retention_days=retention_days,
         )
     return result
 

@@ -8,7 +8,7 @@ import builders
 import helpers
 from db import DbManager, schemas
 from db.event_claims import run_claimed
-from handlers._common import _update_wait_modal
+from handlers._common import _MAINTENANCE_BUSY_TEXT, _close_modal_done, _update_wait_modal
 from helpers.sync_lifecycle import (
     get_sync_channels,
     leave_channel_without_sync,
@@ -318,13 +318,19 @@ def handle_db_reset_proceed(
     if not user_id or not helpers.is_workspace_admin(client, user_id):
         return
 
-    _update_wait_modal(client, body, title="Yikes! Reset Database?", dm=False)
-
-    log_critical("db_reset_triggered", user_id=user_id)
-
     from db import drop_and_init_db
+    from db.run_lock import DATA_MAINTENANCE, DATA_MAINTENANCE_TTL, hold_lock
 
-    drop_and_init_db()
+    # The reset drops the lock row with every other table, so the release after
+    # it finds nothing to delete.
+    with hold_lock(DATA_MAINTENANCE, DATA_MAINTENANCE_TTL) as token:
+        if token is None:
+            log_warning("db_reset_busy", user_id=user_id)
+            _close_modal_done(client, body, f":warning: Reset did not run. {_MAINTENANCE_BUSY_TEXT}")
+            return
+        _update_wait_modal(client, body, title="Yikes! Reset Database?", dm=False)
+        log_critical("db_reset_triggered", user_id=user_id)
+        drop_and_init_db()
 
     helpers.clear_all_caches()
 

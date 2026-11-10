@@ -45,6 +45,13 @@ _DATETIME_COLUMNS = frozenset(
 )
 
 
+def _is_lock_key(key: str | None) -> bool:
+    """A run lock from ``db.run_lock``. It belongs to a process, not to the data."""
+    from db.run_lock import LOCK_PREFIX
+
+    return bool(key) and key.startswith(LOCK_PREFIX)
+
+
 def _dump_raw_table(table_name: str) -> list[dict]:
     """Return all rows from a non-ORM table as dictionaries (dialect-neutral via reflection)."""
     engine = get_engine()
@@ -165,6 +172,8 @@ def build_full_backup() -> dict:
         if table_name in _EPHEMERAL_BACKUP_TABLES:
             continue
         records = DbManager.find_records(cls, [])
+        if table_name == "instance_settings":
+            records = [row for row in records if not _is_lock_key(row.key)]
         payload[table_name] = _records_to_list(records, cls)
     for table_name in _RAW_BACKUP_TABLES:
         payload[table_name] = _dump_raw_table(table_name)
@@ -263,6 +272,8 @@ def restore_full_backup(
             if table_name == "workspace_settings" and row.get("key") == "last_auto_match":
                 row = {**row, "key": "last_auto_map"}
             if table_name == "instance_settings" and row.get("key") == constants.SETTING_PUBLIC_BASE_URL:
+                continue
+            if table_name == "instance_settings" and _is_lock_key(row.get("key")):
                 continue
             kwargs = {}
             for k, v in row.items():

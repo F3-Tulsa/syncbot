@@ -1029,3 +1029,22 @@ class TestRetentionPurge:
         assert result.workspaces_kept == 1
         assert result.workspaces_purged == 0
         assert DbManager.get_record(schemas.Workspace, id=workspace.team_id) is not None
+
+    def test_a_workspace_that_fails_to_purge_is_counted(self, real_db):
+        from datetime import timedelta
+
+        workspace = _workspace()
+        DbManager.update_records(
+            schemas.Workspace,
+            [schemas.Workspace.id == workspace.id],
+            {schemas.Workspace.deleted_at: datetime.now(UTC) - timedelta(days=40)},
+        )
+        with (
+            patch("helpers.notifications.notify_admins_dm"),
+            patch("helpers.sync_cleanup.purge_workspace", side_effect=RuntimeError("boom")),
+        ):
+            from helpers.notifications import purge_soft_deletes
+
+            result = purge_soft_deletes(30)
+        assert result.workspaces_failed == 1
+        assert result.workspaces_purged == 0

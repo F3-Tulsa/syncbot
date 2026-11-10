@@ -1,27 +1,33 @@
 """Data Tools modal for the primary Workspace."""
 
+import time
 from logging import Logger
 
 from slack_sdk.web import WebClient
 
 import helpers
-from handlers._common import _dm_user, _get_selected_option_value, _wait_modal_ack
-from helpers._cache import _cache_delete, _cache_get, _cache_set
+from db.run_lock import DATA_MAINTENANCE, DATA_MAINTENANCE_TTL, hold_lock, is_lock_held
+from handlers._common import (
+    _MAINTENANCE_BUSY_TEXT,
+    _dm_user,
+    _get_selected_option_value,
+    _is_ack_replay,
+    _wait_modal_ack,
+)
 from helpers.data_repair import REPAIR_CHECKS, RepairReport, run_repair
 from helpers.notifications import PurgeResult, purge_soft_deletes
-from logger import log_error
+from logger import log_error, log_info, log_warning
 from slack import actions, orm
 
-_RUNNING_KEY = "data_tools_running"
-_RUNNING_TTL = 900
 _OPTIONS = (
     ("verify", "Verify", "Check database consistency."),
     ("repair", "Repair", "Fix database issues."),
     ("purge", "Purge Soft-Deleted Data", "Remove soft-deleted data immediately."),
 )
 _VERIFY, _REPAIR, _PURGE = (row[0] for row in _OPTIONS)
-_FAILURE_LINE = "Result: Something went wrong. Nothing more was changed. Check the logs."
-_RUNNING_LINE = "Result: Data Tools is already running. Nothing was changed. Try again in a few minutes."
+_FAILURE_LINE = "Result: Something went wrong. Nothing was changed. Check the logs."
+_PURGE_FAILURE_LINE = "Result: Something went wrong. Some data may already be removed. Check the logs."
+_RUNNING_LINE = "Result: A maintenance action is already in progress. Nothing was changed. Try again in a few minutes."
 
 
 def _allowed(client: WebClient, body: dict) -> bool:
@@ -30,6 +36,11 @@ def _allowed(client: WebClient, body: dict) -> bool:
     if not user_id or not team_id or not helpers.is_workspace_admin(client, user_id):
         return False
     return helpers.is_backup_visible_for_workspace(team_id)
+
+
+def _failure_line(option: str | None) -> str:
+    """Verify only reads and Repair rolls back. Purge commits as it goes."""
+    return _PURGE_FAILURE_LINE if option == _PURGE else _FAILURE_LINE
 
 
 def _option_label(value: str | None) -> str:
@@ -77,17 +88,22 @@ def handle_data_tools_submit_ack(body: dict, client: WebClient, context: dict) -
     """Ack phase: refuse while a run is going, else show the wait view. The report is a DM.
 
     The ack only reads the lock. Production runs the ack again before the work,
-    and on Lambda the two can land in different containers, so the work phase
-    takes and clears the lock.
+    so the work phase takes and releases it. A failed read lets the work phase
+    decide. The replay does not log again.
     """
     if not _allowed(client, body):
         return None
-    if _cache_get(_RUNNING_KEY):
+    if _lock_held(context):
+        if not _is_ack_replay(context):
+            log_info(
+                "data_tools_busy",
+                phase="ack",
+                user_id=helpers.get_user_id_from_body(body),
+                option=_get_selected_option_value(body, actions.CONFIG_DATA_TOOLS_OPTION),
+            )
         return {
             "response_action": "errors",
-            "errors": {
-                actions.CONFIG_DATA_TOOLS_OPTION: "Data Tools is already running. Try again in a few minutes.",
-            },
+            "errors": {actions.CONFIG_DATA_TOOLS_OPTION: _MAINTENANCE_BUSY_TEXT},
         }
     label = _option_label(_get_selected_option_value(body, actions.CONFIG_DATA_TOOLS_OPTION))
     return _wait_modal_ack(
@@ -98,32 +114,63 @@ def handle_data_tools_submit_ack(body: dict, client: WebClient, context: dict) -
     )
 
 
+def _lock_held(context: dict | None) -> bool:
+    try:
+        return is_lock_held(DATA_MAINTENANCE, DATA_MAINTENANCE_TTL)
+    except Exception:
+        if not _is_ack_replay(context):
+            log_warning("data_tools_lock_read_failed", exc_info=True)
+        return False
+
+
 def handle_data_tools_submit_work(body: dict, client: WebClient, logger: Logger, context: dict) -> None:
     """Run the chosen tool, then DM the report. A run that finds another one going reports that."""
     user_id = helpers.get_user_id_from_body(body)
+    team_id = helpers.get_team_id_from_body(body)
     option = _get_selected_option_value(body, actions.CONFIG_DATA_TOOLS_OPTION)
     label = _option_label(option)
     workspace_name = "Workspace"
     manager = None
-    running = bool(_cache_get(_RUNNING_KEY))
-    if not running:
-        _cache_set(_RUNNING_KEY, True, ttl=_RUNNING_TTL)
+    started = time.monotonic()
+    ran = False
     try:
         if not _allowed(client, body):
+            log_warning("data_tools_refused", user_id=user_id, team_id=team_id, option=option)
             return
         workspace_name, manager = _notice_identity(client, user_id, body, context)
-        details = [_RUNNING_LINE] if running else _run_option(option)
+        with hold_lock(DATA_MAINTENANCE, DATA_MAINTENANCE_TTL) as token:
+            if token is None:
+                log_info("data_tools_busy", phase="work", user_id=user_id, option=option)
+                details = [_RUNNING_LINE]
+            else:
+                log_info("data_tools_started", user_id=user_id, team_id=team_id, option=option)
+                ran = True
+                details = _run_option(option)
+                log_info(
+                    "data_tools_finished",
+                    user_id=user_id,
+                    option=option,
+                    result=details[-1],
+                    duration_ms=_elapsed_ms(started),
+                )
     except Exception:
-        log_error("data_tools_failed", option=option, exc_info=True)
-        details = [_FAILURE_LINE]
-    finally:
-        if not running:
-            _cache_delete(_RUNNING_KEY)
+        log_error(
+            "data_tools_failed",
+            user_id=user_id,
+            option=option,
+            duration_ms=_elapsed_ms(started),
+            exc_info=True,
+        )
+        details = [_failure_line(option) if ran else _FAILURE_LINE]
     _dm_user(
         client,
         user_id,
         _format_data_tools_notice(action=label, workspace_name=workspace_name, manager=manager, details=details),
     )
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
 
 
 def _notice_identity(client: WebClient, user_id: str | None, body: dict, context: dict) -> tuple[str, str | None]:
@@ -175,6 +222,12 @@ def _kept_sentence(kept: int) -> str:
     return f"{kept} Workspaces are still on an External Connection, so they were kept."
 
 
+def _failed_sentence(failed: int) -> str:
+    if failed == 1:
+        return "1 Workspace could not be removed. Check the logs."
+    return f"{failed} Workspaces could not be removed. Check the logs."
+
+
 def _format_purge_lines(result: PurgeResult) -> list[str]:
     lines = [
         f"Workspaces Removed: {result.workspaces_purged}",
@@ -185,16 +238,22 @@ def _format_purge_lines(result: PurgeResult) -> list[str]:
     ]
     removed = result.workspaces_purged + result.channels_purged + result.syncs_purged + result.groups_disbanded
     kept = result.workspaces_kept
+    failed = result.workspaces_failed
+    if failed:
+        lines.append(f"Workspaces Failed: {failed}")
     row_word = "row" if removed == 1 else "rows"
     removed_sentence = f"Removed {removed} {row_word}."
-    if removed == 0 and kept == 0:
+    if removed == 0 and kept == 0 and failed == 0:
         lines.append("Result: Nothing to purge. Nothing was changed.")
+        return lines
+    sentences = [removed_sentence] if removed else []
+    if kept:
+        sentences.append(_kept_sentence(kept))
+    if failed:
+        sentences.append(_failed_sentence(failed))
     elif removed == 0:
-        lines.append(f"Result: {_kept_sentence(kept)} Nothing was changed.")
-    elif kept == 0:
-        lines.append(f"Result: {removed_sentence}")
-    else:
-        lines.append(f"Result: {removed_sentence} {_kept_sentence(kept)}")
+        sentences.append("Nothing was changed.")
+    lines.append("Result: " + " ".join(sentences))
     return lines
 
 

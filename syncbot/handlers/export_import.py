@@ -11,10 +11,11 @@ import builders
 import constants
 import helpers
 from db import DbManager, schemas
-from handlers._common import _close_modal_done, _update_wait_modal, _wait_modal_ack
+from db.run_lock import DATA_MAINTENANCE, DATA_MAINTENANCE_TTL, hold_lock
+from handlers._common import _MAINTENANCE_BUSY_TEXT, _close_modal_done, _update_wait_modal, _wait_modal_ack
 from helpers import export_import as ei
 from helpers.workspace import invalidate_fed_ws_for_sync_cache
-from logger import log_error, log_warning
+from logger import log_error, log_info, log_warning
 from slack import actions, orm
 
 # Uploaded JSON (backup / migration) download timeout — size follows Slack's per-file max.
@@ -366,9 +367,14 @@ def handle_backup_restore_proceed(
 
 
 def _finish_restore(data: dict, client: WebClient, body: dict, user_id: str) -> None:
-    """Run restore, then replace the wait modal with the outcome."""
+    """Run restore under the run lock, then replace the wait modal with the outcome."""
     try:
-        _do_restore(data, client, user_id)
+        with hold_lock(DATA_MAINTENANCE, DATA_MAINTENANCE_TTL) as token:
+            if token is None:
+                log_info("backup_restore_busy", user_id=user_id)
+                _close_modal_done(client, body, f":warning: Restore did not run. {_MAINTENANCE_BUSY_TEXT}")
+                return
+            _do_restore(data, client, user_id)
     except Exception:
         _close_modal_done(client, body, ":warning: Restore failed. Try Backup / Restore again.")
         return
@@ -1167,21 +1173,30 @@ def _complete_data_migration_import(
         else (meta.get("source_name") or "Connection")
     )
     try:
-        _run_migration_import(
-            data,
-            workspace_record,
-            team_id_to_workspace_id,
-            group_id,
-            client=client,
-            acting_user_id=user_id,
-            context=context,
-        )
-        result, peer = "resumed", None
-        team_id = getattr(workspace_record, "team_id", None)
-        if kind in _STANDALONE_KINDS and team_id:
-            helpers.restore_migrated_workspace(team_id)
-        elif team_id:
-            result, peer = helpers.consider_migration_release(team_id)
+        with hold_lock(DATA_MAINTENANCE, DATA_MAINTENANCE_TTL) as token:
+            if token is None:
+                log_info("data_migration_import_busy", user_id=user_id)
+                busy = True
+            else:
+                busy = False
+                _run_migration_import(
+                    data,
+                    workspace_record,
+                    team_id_to_workspace_id,
+                    group_id,
+                    client=client,
+                    acting_user_id=user_id,
+                    context=context,
+                )
+                result, peer = "resumed", None
+                team_id = getattr(workspace_record, "team_id", None)
+                if kind in _STANDALONE_KINDS and team_id:
+                    helpers.restore_migrated_workspace(team_id)
+                elif team_id:
+                    result, peer = helpers.consider_migration_release(team_id)
+        if busy:
+            _notify_import_result(client, body, user_id, ":warning: Import stopped. " + _MAINTENANCE_BUSY_TEXT)
+            return
         builders.refresh_home_tab_for_workspace(
             workspace_record,
             logger,

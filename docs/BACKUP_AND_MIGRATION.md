@@ -6,6 +6,8 @@ This page covers three tools:
 - **Reset Database** wipes the instance and starts it over, empty.
 - **Data Migration** moves one Workspace from one SyncBot instance to another.
 
+Restore, Reset Database, a Data Migration import, Data Tools, and the retention purge take turns. Only one runs at a time, even when SyncBot runs on several servers. If another one is running, SyncBot says a maintenance action is already in progress and changes nothing; try again in a few minutes. A run that stopped without finishing frees its turn after 10 minutes.
+
 ## Full-instance backup and restore
 
 Only the primary Workspace has this. Its Slack admins see **Backup/Restore** on the Home tab, next to Refresh. If your instance does not have `PRIMARY_WORKSPACE` set, then nobody sees the button.
@@ -47,7 +49,14 @@ Data Tools is on the primary Workspace's Home tab, for a Slack admin there. It c
 - **Repair** fixes what Verify finds.
 - **Purge Soft-Deleted Data** removes soft-deleted data now, instead of waiting for the retention period.
 
-Choose Run. The modal tells you to close it, and the report arrives by DM, even when nothing was found. A finished Repair deletes leftover rows for good. A failed Repair leaves the database as it was.
+Choose Run. The modal tells you to close it, and the report arrives by DM, even when nothing was found. A finished Repair deletes leftover rows for good.
+
+If a run fails, the report says so:
+
+- A failed Verify or Repair leaves the database as it was.
+- A failed Purge may already have removed some data. A Workspace that could not be removed is counted as Workspaces Failed, and the next Purge tries it again.
+
+The app logs each run with who ran it, the option, the result, and how long it took. Filter the logs for `data_tools_`, `data_repair_`, `purge_`, and `run_lock_` to follow one.
 
 ## Move a Workspace
 
