@@ -54,9 +54,17 @@ def run_repair(*, fix: bool) -> RepairReport:
     missing_group_ids = {row.id for row in missing_group}
 
     missing_sync = [row for row in channels if row.sync_id is not None and row.sync_id not in sync_by_id]
+    missing_sync_ids = {row.id for row in missing_sync}
     in_live_sync = [row for row in channels if row.sync_id in sync_by_id and row.sync_id not in missing_group_ids]
+    # Like migration 022: a gone Workspace removes the Channel even when its Sync
+    # reference is blank. A blank Workspace reference is not a gone Workspace.
     missing_workspace = [
-        row for row in in_live_sync if row.workspace_id is not None and row.workspace_id not in workspace_ids
+        row
+        for row in channels
+        if row.id not in missing_sync_ids
+        and row.sync_id not in missing_group_ids
+        and row.workspace_id is not None
+        and row.workspace_id not in workspace_ids
     ]
     missing_workspace_channel_ids = {row.id for row in missing_workspace}
     outside = [

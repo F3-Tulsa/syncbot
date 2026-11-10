@@ -430,6 +430,31 @@ def test_repair_and_migration_agree(tmp_path):
                 "INSERT INTO workspace_settings (workspace_id, key, value) VALUES (424242, 'allow_private_channels', 'no')",
                 (),
             )
+            # Blank references stay. A gone Workspace removes a Channel even with a blank Sync.
+            now = _now()
+            DbManager.create_record(
+                schemas.SyncChannel(
+                    sync_id=None, workspace_id=workspace_a.id, channel_id="CNULLSYNC", status="active", created_at=now
+                )
+            )
+            _fk_off(
+                "INSERT INTO sync_channels (sync_id, workspace_id, channel_id, status, publishes, subscribes, created_at)"
+                " VALUES (NULL, 515151, 'CGONEWS', 'active', 1, 1, ?)",
+                (now,),
+            )
+            DbManager.create_record(schemas.PostMeta(post_id="PNULL", sync_channel_id=None, ts=1700000000.0003))
+            DbManager.create_record(schemas.UserDirectory(workspace_id=None, slack_user_id="UNULL", updated_at=now))
+            DbManager.create_record(
+                schemas.UserMapping(
+                    source_workspace_id=None,
+                    source_user_id="UNULLMAP",
+                    target_workspace_id=workspace_a.id,
+                    mapped_at=now,
+                )
+            )
+            DbManager.create_record(
+                schemas.WorkspaceGroupMember(group_id=group.id, workspace_id=None, status="active", joined_at=now)
+            )
             if mode == "migrate":
                 with db_mod.get_engine().begin() as conn:
                     conn.execute(text("UPDATE alembic_version SET version_num = '021_sync_channel_privacy'"))
@@ -448,12 +473,31 @@ def test_repair_and_migration_agree(tmp_path):
             settings = DbManager.find_records(
                 schemas.WorkspaceSetting, [schemas.WorkspaceSetting.workspace_id == 424242]
             )
+            directory = sorted(
+                row.slack_user_id
+                for row in DbManager.find_records(schemas.UserDirectory, [schemas.UserDirectory.id.isnot(None)])
+            )
+            mappings = sorted(
+                row.source_user_id
+                for row in DbManager.find_records(schemas.UserMapping, [schemas.UserMapping.id.isnot(None)])
+            )
+            blank_members = DbManager.find_records(
+                schemas.WorkspaceGroupMember, [schemas.WorkspaceGroupMember.workspace_id.is_(None)]
+            )
             if db_mod.GLOBAL_ENGINE:
                 db_mod.GLOBAL_ENGINE.dispose()
             db_mod.GLOBAL_ENGINE = None
-            return channels, posts, len(settings)
+            return channels, posts, len(settings), directory, mappings, len(blank_members)
 
-    assert run(tmp_path / "repair.db", "repair") == run(tmp_path / "migrate.db", "migrate")
+    repaired = run(tmp_path / "repair.db", "repair")
+    assert repaired == run(tmp_path / "migrate.db", "migrate")
+    channels, posts, _settings, directory, mappings, blank_members = repaired
+    assert "CNULLSYNC" in channels
+    assert "CGONEWS" not in channels
+    assert "PNULL" in posts
+    assert directory == ["UNULL"]
+    assert mappings == ["UNULLMAP"]
+    assert blank_members == 1
 
 
 def test_repair_logs_what_it_committed(real_db):
