@@ -85,10 +85,7 @@ def _fake_lock(request):
         finally:
             held["exited"] += 1
 
-    with (
-        patch("handlers.data_tools.hold_lock", side_effect=_free),
-        patch("handlers.data_tools.is_lock_held", return_value=False),
-    ):
+    with patch("handlers.data_tools.hold_lock", side_effect=_free):
         yield held
 
 
@@ -189,38 +186,7 @@ def test_purge_description_fits_slack():
         assert len(option["description"]["text"]) < 75
 
 
-def test_run_while_running_returns_the_error():
-    with _allow(), patch("handlers.data_tools.is_lock_held", return_value=True):
-        result = handle_data_tools_submit_ack(_body(), MagicMock(), {})
-    assert "A maintenance action is already in progress." in result["errors"]["data_tools_option"]
-
-
-def test_ack_shows_the_wait_view_when_the_lock_cannot_be_read():
-    with (
-        _allow(),
-        patch("handlers.data_tools.is_lock_held", side_effect=RuntimeError("db down")),
-        patch("handlers.data_tools.log_warning") as log_warning,
-    ):
-        result = handle_data_tools_submit_ack(_body(), MagicMock(), {})
-    assert result["response_action"] == "update"
-    assert log_warning.call_args.args[0] == "data_tools_lock_read_failed"
-
-
-def test_ack_replay_never_refuses():
-    with (
-        _allow(),
-        patch("handlers.data_tools.is_lock_held", return_value=True) as held,
-        patch("handlers.data_tools.log_info") as log_info,
-    ):
-        first = handle_data_tools_submit_ack(_body(), MagicMock(), {})
-        replay = handle_data_tools_submit_ack(_body(), MagicMock(), {"view_ack_replay": True})
-    assert first["response_action"] == "errors"
-    assert replay["response_action"] == "update"
-    assert held.call_count == 1
-    assert [call.args[0] for call in log_info.call_args_list] == ["data_tools_busy"]
-
-
-def test_lock_taken_between_ack_and_replay_still_dms(real_db):
+def test_lock_taken_after_the_ack_still_dms(real_db):
     import app as app_module
     from db.run_lock import DATA_MAINTENANCE, release_lock
 
@@ -248,22 +214,6 @@ def test_lock_taken_between_ack_and_replay_still_dms(real_db):
         release_lock(DATA_MAINTENANCE, token)
 
 
-def test_production_marks_the_ack_replay():
-    import app as app_module
-
-    body = _body()
-    body["type"] = "view_submission"
-    body["view"]["callback_id"] = "data_tools_submit"
-    seen = []
-    with (
-        patch.dict(app_module.VIEW_ACK_MAPPER, {"data_tools_submit": lambda b, c, ctx: seen.append(dict(ctx))}),
-        patch.dict(app_module.MAIN_MAPPER, {"view_submission": {}}),
-        patch.object(app_module, "LOCAL_DEVELOPMENT", False),
-    ):
-        app_module.main_response(body, MagicMock(), MagicMock(), MagicMock(), {})
-    assert seen == [{"view_ack_replay": True}]
-
-
 def test_ack_does_not_take_the_lock(real_db):
     with _allow():
         first = handle_data_tools_submit_ack(_body(), MagicMock(), {})
@@ -274,16 +224,46 @@ def test_ack_does_not_take_the_lock(real_db):
     assert _lock_is_held() is False
 
 
-def test_ack_refuses_while_another_process_holds_the_lock(real_db):
+def test_ack_ignores_a_held_lock(real_db):
+    """The ack never reads the lock, so the first ack and the replay give the same answer."""
     from db.run_lock import DATA_MAINTENANCE, release_lock
 
     token = _hold_lock()
     try:
         with _allow():
             result = handle_data_tools_submit_ack(_body(), MagicMock(), {})
-        assert "A maintenance action is already in progress." in result["errors"]["data_tools_option"]
+        assert result["response_action"] == "update"
     finally:
         release_lock(DATA_MAINTENANCE, token)
+
+
+def test_lock_freed_after_the_ack_runs_and_reports(real_db):
+    """The admin saw the wait view, so a run that goes ahead matches what they were told."""
+    import app as app_module
+    from db.run_lock import DATA_MAINTENANCE, release_lock
+    from helpers.data_repair import RepairReport
+
+    body = _body("repair")
+    body["type"] = "view_submission"
+    body["view"]["callback_id"] = "data_tools_submit"
+    token = _hold_lock()
+    with _allow():
+        first = handle_data_tools_submit_ack(body, MagicMock(), {})
+    assert first["response_action"] == "update"
+    release_lock(DATA_MAINTENANCE, token)
+    with (
+        _allow(),
+        _notice_patches(),
+        patch("handlers.data_tools.run_repair", return_value=RepairReport()) as repair,
+        _dm_text() as dm,
+        patch.object(app_module, "LOCAL_DEVELOPMENT", False),
+        patch.object(app_module, "emit_metric"),
+    ):
+        app_module.main_response(body, MagicMock(), MagicMock(), MagicMock(), {})
+    repair.assert_called_once()
+    dm.assert_called_once()
+    assert "already in progress" not in dm.call_args.args[2]
+    assert _lock_is_held() is False
 
 
 def test_work_while_running_reports_it_and_keeps_the_lock(real_db):
@@ -376,7 +356,7 @@ def test_run_shows_the_running_text():
         "other": "Verify",
     }
     for option, label in labels.items():
-        with _allow(), patch("handlers.data_tools.is_lock_held", return_value=False):
+        with _allow():
             ack = handle_data_tools_submit_ack(_body(option), MagicMock(), {})
         assert (
             ack["view"]["blocks"][0]["text"]["text"] == f"{label} is running. Close this and SyncBot will DM a report."

@@ -6,14 +6,8 @@ from logging import Logger
 from slack_sdk.web import WebClient
 
 import helpers
-from db.run_lock import DATA_MAINTENANCE, DATA_MAINTENANCE_TTL, hold_lock, is_lock_held
-from handlers._common import (
-    _MAINTENANCE_BUSY_TEXT,
-    _dm_user,
-    _get_selected_option_value,
-    _is_ack_replay,
-    _wait_modal_ack,
-)
+from db.run_lock import DATA_MAINTENANCE, DATA_MAINTENANCE_TTL, hold_lock
+from handlers._common import _dm_user, _get_selected_option_value, _wait_modal_ack
 from helpers.data_repair import REPAIR_CHECKS, RepairReport, run_repair
 from helpers.notifications import PurgeResult, purge_soft_deletes
 from logger import log_error, log_info, log_warning
@@ -85,29 +79,15 @@ def handle_data_tools(body: dict, client: WebClient, logger: Logger, context: di
 
 
 def handle_data_tools_submit_ack(body: dict, client: WebClient, context: dict) -> dict | None:
-    """Ack phase: refuse while a run is going, else show the wait view. The report is a DM.
+    """Ack phase: show the wait view. The report is a DM.
 
-    The ack only reads the lock. Production runs the ack again before the work,
-    so the work phase takes and releases it. A failed read lets the work phase
-    decide.
-
-    The replay never refuses: Slack already has the first answer, and an error
-    here would skip the work, so a submission the first ack accepted would get
-    no report. The work phase finds a held lock itself and DMs that.
+    The ack never reads the run lock. Production runs the ack again before the
+    work, and the lock can change between the two calls, so a busy check here
+    could refuse a run that then goes ahead, or accept one the work skips. The
+    work phase takes the lock and DMs the busy line when another run holds it.
     """
     if not _allowed(client, body):
         return None
-    if not _is_ack_replay(context) and _lock_held():
-        log_info(
-            "data_tools_busy",
-            phase="ack",
-            user_id=helpers.get_user_id_from_body(body),
-            option=_get_selected_option_value(body, actions.CONFIG_DATA_TOOLS_OPTION),
-        )
-        return {
-            "response_action": "errors",
-            "errors": {actions.CONFIG_DATA_TOOLS_OPTION: _MAINTENANCE_BUSY_TEXT},
-        }
     label = _option_label(_get_selected_option_value(body, actions.CONFIG_DATA_TOOLS_OPTION))
     return _wait_modal_ack(
         title="Data Tools",
@@ -115,14 +95,6 @@ def handle_data_tools_submit_ack(body: dict, client: WebClient, context: dict) -
         dm=True,
         text=f"{label} is running. Close this and SyncBot will DM a report.",
     )
-
-
-def _lock_held() -> bool:
-    try:
-        return is_lock_held(DATA_MAINTENANCE, DATA_MAINTENANCE_TTL)
-    except Exception:
-        log_warning("data_tools_lock_read_failed", exc_info=True)
-        return False
 
 
 def handle_data_tools_submit_work(body: dict, client: WebClient, logger: Logger, context: dict) -> None:
@@ -142,7 +114,7 @@ def handle_data_tools_submit_work(body: dict, client: WebClient, logger: Logger,
         workspace_name, manager = _notice_identity(client, user_id, body, context)
         with hold_lock(DATA_MAINTENANCE, DATA_MAINTENANCE_TTL) as token:
             if token is None:
-                log_info("data_tools_busy", phase="work", user_id=user_id, option=option)
+                log_info("data_tools_busy", user_id=user_id, option=option)
                 details = [_RUNNING_LINE]
             else:
                 log_info("data_tools_started", user_id=user_id, team_id=team_id, option=option)
